@@ -42,8 +42,9 @@ class FlowWorkerApp:
         self.root.title(f"Flow Worker - {self.cfg.get('worker_name', 'Flow Worker1')}")
         self.root.geometry(str(self.cfg.get("window_geometry") or "1060x760"))
         self.root.minsize(900, 560)
-        self.root.configure(bg="#14161B")
+        self.root.configure(bg=self._bg("root_bg"))
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self._apply_window_icon()
 
         self._build_vars()
         self._build_ui()
@@ -79,33 +80,43 @@ class FlowWorkerApp:
 
     def _bg(self, key: str) -> str:
         theme = {
-            "root_bg": "#14161B",
-            "top_left_bg": "#1D2432",
-            "top_left_border": "#41608A",
-            "top_mid_bg": "#202B3E",
-            "top_mid_border": "#4C6B9A",
-            "top_right_bg": "#1D2432",
-            "settings_bg": "#1A2F4F",
-            "settings_border": "#5B84B8",
-            "queue_panel_bg": "#17283F",
-            "queue_panel_border": "#5B84B8",
-            "log_panel_bg": "#14161B",
-            "log_text_bg": "#101723",
-            "log_text_fg": "#D7E5FF",
-            "muted_fg": "#A9BDD8",
-            "sub_fg": "#C4D4EC",
-            "chip_bg": "#20304A",
-            "chip_fg": "#8FD0FF",
-            "progress_bg": "#152033",
-            "progress_border": "#314966",
-            "progress_fill": "#4CA7FF",
-            "small_btn_bg": "#233042",
-            "open_btn_bg": "#31527D",
-            "start_btn_bg": "#2F8A68",
-            "settings_toggle_bg": "#233042",
-            "status_fg": "#79E3A0",
+            "root_bg": "#181511",
+            "top_left_bg": "#2C2019",
+            "top_left_border": "#B87A3E",
+            "top_mid_bg": "#31251D",
+            "top_mid_border": "#D79248",
+            "top_right_bg": "#2C2019",
+            "settings_bg": "#2A241E",
+            "settings_border": "#C58A4B",
+            "queue_panel_bg": "#221C17",
+            "queue_panel_border": "#B87A3E",
+            "log_panel_bg": "#161311",
+            "log_text_bg": "#100E0C",
+            "log_text_fg": "#F7EBDD",
+            "muted_fg": "#D9C1A6",
+            "sub_fg": "#E8D5BF",
+            "chip_bg": "#3A2B21",
+            "chip_fg": "#F4C27E",
+            "progress_bg": "#1A1612",
+            "progress_border": "#6F4A28",
+            "progress_fill": "#E3A054",
+            "small_btn_bg": "#4A3526",
+            "open_btn_bg": "#7D522E",
+            "start_btn_bg": "#2E7A54",
+            "settings_toggle_bg": "#5D442D",
+            "status_fg": "#8FF0A8",
         }
         return theme[key]
+
+    def _apply_window_icon(self) -> None:
+        icon_path = self.base_dir / "flow_worker" / "assets" / "flow_worker_icon.png"
+        if not icon_path.exists():
+            return
+        try:
+            self.window_icon = tk.PhotoImage(file=str(icon_path))
+            self.root.iconphoto(True, self.window_icon)
+        except Exception:
+            self.window_icon = None
 
     def _build_ui(self) -> None:
         root = self.root
@@ -310,7 +321,7 @@ class FlowWorkerApp:
 
     def _choice_menu(self, parent, variable: tk.StringVar, values):
         menu = tk.OptionMenu(parent, variable, *values)
-        menu.configure(font=("Malgun Gothic", 10), bg="#F0EDE4", width=7, highlightthickness=0)
+        menu.configure(font=("Malgun Gothic", 10), bg="#F6E3CA", width=7, highlightthickness=0)
         variable.trace_add("write", lambda *_: self.auto_save("선택값 변경"))
         return menu
 
@@ -319,7 +330,7 @@ class FlowWorkerApp:
         row.pack(fill="x", padx=4, pady=(0, 6))
         tk.Label(row, text=label, bg=self._bg("settings_bg"), fg="#D8E4FF", font=("Malgun Gothic", 10)).pack(anchor="w")
         combo = tk.OptionMenu(row, variable, "")
-        combo.configure(font=("Malgun Gothic", 10), bg="#F0EDE4", width=38, highlightthickness=0)
+        combo.configure(font=("Malgun Gothic", 10), bg="#F6E3CA", width=38, highlightthickness=0)
         combo.pack(fill="x", pady=(6, 0))
         variable.trace_add("write", lambda *_: callback())
         if label == "프롬프트 파일":
@@ -709,6 +720,8 @@ class FlowWorkerApp:
                 set_status=self._threadsafe_status,
                 update_queue=self._threadsafe_queue_update,
                 should_stop=lambda: self.stop_requested,
+                is_paused=lambda: self.paused,
+                browser=self.browser,
             )
 
         self.run_thread = threading.Thread(target=_run, daemon=True)
@@ -783,19 +796,20 @@ class FlowWorkerApp:
                 else:
                     pending += 1
                 color = {
-                    "pending": "#233042",
-                    "running": "#244D7B",
-                    "waiting": "#314966",
-                    "downloading": "#2E6E5A",
-                    "success": "#1F5E43",
-                    "failed": "#6B2B38",
-                }.get(status, "#233042")
+                    "pending": "#433124",
+                    "running": "#7D522E",
+                    "waiting": "#6E5B45",
+                    "downloading": "#2F6B53",
+                    "success": "#2A6F4C",
+                    "failed": "#7E3842",
+                }.get(status, "#433124")
                 card = tk.Frame(self.queue_inner, bg=color, highlightbackground=self._bg("queue_panel_border"), highlightthickness=1)
                 card.pack(fill="x", pady=(0, 8))
                 tk.Label(card, text=item.tag, bg=color, fg="#FFFFFF", font=("Malgun Gothic", 10, "bold")).pack(anchor="w", padx=10, pady=(8, 2))
                 detail = item.message or item.prompt
                 tk.Label(card, text=detail[:160], bg=color, fg="#E8F1FF", justify="left", wraplength=620).pack(anchor="w", padx=10, pady=(0, 8))
         self.queue_summary_var.set(f"활성 {active}개 | 완료 {success} | 실패 {failed} | 대기 {pending}")
+        self._refresh_progress_from_queue()
         self._update_queue_scroll()
 
     def _render_log(self) -> None:
@@ -818,9 +832,27 @@ class FlowWorkerApp:
             pass
 
     def log(self, message: str) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            self.root.after(0, lambda msg=message: self.log(msg))
+            return
         self.log_lines.append(message)
         self.log_lines = self.log_lines[-200:]
         self._render_log()
+
+    def _refresh_progress_from_queue(self) -> None:
+        total = len(self.queue_items)
+        if total <= 0:
+            self.progress_var.set("0 / 0 (0.0%)")
+            self.progress_canvas.coords(self.progress_fill, 0, 0, 0, 18)
+            return
+        done = 0
+        for item in self.queue_items:
+            if str(item.status or "").strip().lower() in {"success", "failed"}:
+                done += 1
+        ratio = max(0.0, min(1.0, done / total))
+        self.progress_var.set(f"{done} / {total} ({ratio * 100:.1f}%)")
+        width = int(round(230 * ratio))
+        self.progress_canvas.coords(self.progress_fill, 0, 0, width, 18)
 
     def _start_resize_drag(self, event) -> None:
         self._resize_drag_origin = (event.x_root, event.y_root, self.root.winfo_width(), self.root.winfo_height())
