@@ -35,6 +35,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "prompt_separator": "|||",
     "prompt_prefix": "S",
     "prompt_pad_width": 3,
+    "start_url": "https://labs.google/fx/ko/tools/flow",
+    "input_selector": "[role='textbox']:not([aria-label*='검색' i]):not([aria-label*='asset' i])",
+    "submit_selector": "button:has-text('생성')",
     "number_mode": "all",
     "start_number": 1,
     "end_number": 10,
@@ -44,14 +47,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "browser_attach_url": DEFAULT_BROWSER_ATTACH_URL,
     "edge_window_inner_width": 968,
     "edge_window_inner_height": 940,
-    "edge_window_left": 0,
-    "edge_window_top": 0,
+    "edge_window_left": 10,
+    "edge_window_top": 10,
     "edge_window_lock_position": False,
     "media_mode": "image",
     "image_variant_count": "x1",
     "video_variant_count": "x1",
     "image_quality": "1K",
     "video_quality": "1080P",
+    "download_image_quality": "1K",
+    "download_video_quality": "720P",
+    "typing_speed": 1.0,
+    "humanize_typing": True,
     "generate_wait_seconds": 10.0,
     "next_prompt_wait_seconds": 7.0,
     "window_geometry": "1060x760",
@@ -121,9 +128,13 @@ def _copy_legacy_prompt_files(base_dir: Path, legacy_root: Path, prompt_slots: l
 def bootstrap_from_legacy_flow(base_dir: Path) -> dict[str, Any] | None:
     legacy_root = _legacy_flow_root(base_dir)
     legacy_cfg_path = legacy_root / "flow_config.json"
+    legacy_image_cfg_path = legacy_root / "flow_config_이미지_워커1.json"
+    legacy_video_cfg_path = legacy_root / "flow_config_S자동화_워커1.json"
     if not legacy_cfg_path.exists():
         return None
     legacy_cfg = _read_json(legacy_cfg_path)
+    legacy_image_cfg = _read_json(legacy_image_cfg_path)
+    legacy_video_cfg = _read_json(legacy_video_cfg_path)
     if not legacy_cfg:
         return None
     cfg = deepcopy(DEFAULT_CONFIG)
@@ -143,6 +154,40 @@ def bootstrap_from_legacy_flow(base_dir: Path) -> dict[str, Any] | None:
     if copied_slots:
         cfg["prompt_slots"] = copied_slots
         cfg["prompt_slot_index"] = max(0, min(int(legacy_cfg.get("active_prompt_slot", 0) or 0), len(copied_slots) - 1))
+    start_url = str(legacy_image_cfg.get("start_url") or legacy_video_cfg.get("start_url") or "").strip()
+    if start_url:
+        cfg["start_url"] = start_url
+        cfg["flow_site_url"] = start_url
+    input_selector = str(legacy_image_cfg.get("input_selector") or legacy_video_cfg.get("input_selector") or "").strip()
+    submit_selector = str(legacy_image_cfg.get("submit_selector") or legacy_video_cfg.get("submit_selector") or "").strip()
+    if input_selector:
+        cfg["input_selector"] = input_selector
+    if submit_selector:
+        cfg["submit_selector"] = submit_selector
+    image_quality = str(legacy_image_cfg.get("download_image_quality") or "").strip().upper()
+    video_quality = str(legacy_video_cfg.get("download_video_quality") or "").strip().upper()
+    if image_quality in {"1K", "2K", "4K"}:
+        cfg["image_quality"] = image_quality
+        cfg["download_image_quality"] = image_quality
+    if video_quality in {"720P", "1080P", "4K"}:
+        cfg["video_quality"] = video_quality
+        cfg["download_video_quality"] = video_quality
+    generate_wait = legacy_image_cfg.get("generate_wait_seconds")
+    next_wait = legacy_image_cfg.get("next_prompt_wait_seconds")
+    if generate_wait not in (None, ""):
+        try:
+            cfg["generate_wait_seconds"] = float(generate_wait)
+        except Exception:
+            pass
+    if next_wait not in (None, ""):
+        try:
+            cfg["next_prompt_wait_seconds"] = float(next_wait)
+        except Exception:
+            pass
+    for key in ("edge_window_inner_width", "edge_window_inner_height", "edge_window_left", "edge_window_top", "edge_window_lock_position"):
+        value = legacy_image_cfg.get(key, legacy_video_cfg.get(key))
+        if value not in (None, ""):
+            cfg[key] = value
     return cfg
 
 
@@ -162,6 +207,16 @@ def _ensure_prompt_slots(base_dir: Path, cfg: dict[str, Any]) -> dict[str, Any]:
     cfg["prompt_slots"] = normalized_slots
     if not cfg.get("download_output_dir"):
         cfg["download_output_dir"] = str((base_dir / DOWNLOADS_DIR).resolve())
+    cfg["start_url"] = str(cfg.get("start_url") or cfg.get("flow_site_url") or DEFAULT_CONFIG["start_url"]).strip() or DEFAULT_CONFIG["start_url"]
+    cfg["flow_site_url"] = cfg["start_url"]
+    cfg["input_selector"] = str(cfg.get("input_selector") or DEFAULT_CONFIG["input_selector"]).strip() or DEFAULT_CONFIG["input_selector"]
+    cfg["submit_selector"] = str(cfg.get("submit_selector") or DEFAULT_CONFIG["submit_selector"]).strip() or DEFAULT_CONFIG["submit_selector"]
+    image_quality = str(cfg.get("image_quality") or cfg.get("download_image_quality") or DEFAULT_CONFIG["image_quality"]).strip().upper()
+    cfg["image_quality"] = image_quality if image_quality in {"1K", "2K", "4K"} else DEFAULT_CONFIG["image_quality"]
+    cfg["download_image_quality"] = cfg["image_quality"]
+    video_quality = str(cfg.get("video_quality") or cfg.get("download_video_quality") or DEFAULT_CONFIG["video_quality"]).strip().upper()
+    cfg["video_quality"] = video_quality if video_quality in {"720P", "1080P", "4K"} else DEFAULT_CONFIG["video_quality"]
+    cfg["download_video_quality"] = cfg["video_quality"]
     project_profiles = list(cfg.get("project_profiles") or [])
     if not project_profiles:
         cfg["project_profiles"] = deepcopy(DEFAULT_CONFIG["project_profiles"])
