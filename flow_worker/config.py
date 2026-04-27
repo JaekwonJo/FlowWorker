@@ -12,6 +12,8 @@ PROMPTS_DIR = "prompts"
 RUNTIME_DIR = "runtime"
 LOGS_DIR = "logs"
 DOWNLOADS_DIR = "downloads"
+DEFAULT_BROWSER_PROFILE_DIR = f"{RUNTIME_DIR}/flow_worker_edge_profile"
+DEFAULT_BROWSER_ATTACH_URL = "http://127.0.0.1:9333"
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -38,8 +40,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "end_number": 10,
     "manual_numbers": "",
     "download_output_dir": "",
-    "browser_profile_dir": f"{RUNTIME_DIR}/edge_profile_1",
-    "browser_attach_url": "http://127.0.0.1:9222",
+    "browser_profile_dir": DEFAULT_BROWSER_PROFILE_DIR,
+    "browser_attach_url": DEFAULT_BROWSER_ATTACH_URL,
     "edge_window_inner_width": 968,
     "edge_window_inner_height": 940,
     "edge_window_left": 0,
@@ -164,6 +166,13 @@ def _ensure_prompt_slots(base_dir: Path, cfg: dict[str, Any]) -> dict[str, Any]:
     if not project_profiles:
         cfg["project_profiles"] = deepcopy(DEFAULT_CONFIG["project_profiles"])
         project_profiles = list(cfg["project_profiles"])
+    profile_dir = str(cfg.get("browser_profile_dir") or "").strip().replace("\\", "/")
+    attach_url = str(cfg.get("browser_attach_url") or "").strip()
+    if not profile_dir or profile_dir in {f"{RUNTIME_DIR}/edge_profile_1", "runtime/edge_profile_1"}:
+        cfg["browser_profile_dir"] = DEFAULT_BROWSER_PROFILE_DIR
+    if not attach_url or attach_url in {"http://127.0.0.1:9222", "127.0.0.1:9222"}:
+        cfg["browser_attach_url"] = DEFAULT_BROWSER_ATTACH_URL
+    (base_dir / str(cfg.get("browser_profile_dir") or DEFAULT_BROWSER_PROFILE_DIR)).mkdir(parents=True, exist_ok=True)
     cfg["project_index"] = max(0, min(int(cfg.get("project_index", 0) or 0), len(project_profiles) - 1))
     cfg["prompt_slot_index"] = max(0, min(int(cfg.get("prompt_slot_index", 0) or 0), len(normalized_slots) - 1))
     return cfg

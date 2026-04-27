@@ -75,8 +75,8 @@ class FlowAutomationEngine:
         log(f"브라우저 연결 준비: {project.get('name', '프로젝트')}")
         page = browser.ensure_page(
             url=project_url,
-            profile_dir=str(self.base_dir / str(self.cfg.get("browser_profile_dir") or "runtime/edge_profile_1")),
-            attach_url=str(self.cfg.get("browser_attach_url") or "http://127.0.0.1:9222"),
+            profile_dir=str(self.base_dir / str(self.cfg.get("browser_profile_dir") or "runtime/flow_worker_edge_profile")),
+            attach_url=str(self.cfg.get("browser_attach_url") or "http://127.0.0.1:9333"),
             window_cfg=self.cfg,
         )
         try:
