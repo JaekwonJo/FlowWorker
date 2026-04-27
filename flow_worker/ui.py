@@ -685,6 +685,10 @@ class FlowWorkerApp:
             messagebox.showwarning("안내", "프로젝트 URL을 먼저 입력해주세요.", parent=self.root)
             return
         try:
+            self.log(
+                f"브라우저 열기 요청 | 프로필={self.cfg.get('browser_profile_dir')} | "
+                f"포트={self.cfg.get('browser_attach_url')}"
+            )
             self.browser.open_project(
                 url=str(project.get("url") or ""),
                 profile_dir=str(self.base_dir / str(self.cfg.get("browser_profile_dir") or "runtime/flow_worker_edge_profile")),
@@ -713,16 +717,20 @@ class FlowWorkerApp:
         self.log(f"실행 시작: {plan.selection_summary}")
 
         def _run() -> None:
-            engine = FlowAutomationEngine(self.base_dir, self.cfg)
-            engine.run(
-                plan=plan,
-                log=self.log,
-                set_status=self._threadsafe_status,
-                update_queue=self._threadsafe_queue_update,
-                should_stop=lambda: self.stop_requested,
-                is_paused=lambda: self.paused,
-                browser=self.browser,
-            )
+            try:
+                engine = FlowAutomationEngine(self.base_dir, self.cfg)
+                engine.run(
+                    plan=plan,
+                    log=self.log,
+                    set_status=self._threadsafe_status,
+                    update_queue=self._threadsafe_queue_update,
+                    should_stop=lambda: self.stop_requested,
+                    is_paused=lambda: self.paused,
+                    browser=self.browser,
+                )
+            except Exception as exc:
+                self._threadsafe_status("실행 실패")
+                self.log(f"실행 실패: {exc}")
 
         self.run_thread = threading.Thread(target=_run, daemon=True)
         self.run_thread.start()
