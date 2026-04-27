@@ -136,37 +136,45 @@ class BrowserManager:
     def _close_duplicate_tabs(self, context, *, keep_page, target_url: str = "") -> None:
         pages = [page for page in list(context.pages or []) if page and (not page.is_closed())]
         target_url = str(target_url or "").strip()
-        kept_target = False
-        keep_has_target = False
-        try:
-            if keep_page is not None and target_url:
-                keep_has_target = target_url in str(keep_page.url or "")
-        except Exception:
-            keep_has_target = False
+        target_pages = []
+        blank_pages = []
         for page in pages:
-            if page == keep_page:
-                kept_target = keep_has_target
-                continue
             try:
-                current_url = str(page.url or "")
+                current_url = str(page.url or "").strip()
             except Exception:
                 current_url = ""
             if target_url and target_url in current_url:
-                if kept_target:
-                    try:
-                        page.close()
-                    except Exception:
-                        pass
-                else:
-                    kept_target = True
-                    try:
-                        if keep_page is not None and not keep_page.is_closed() and str(keep_page.url or "").strip() == "about:blank":
-                            keep_page.close()
-                            keep_page = page
-                        self.page = page
-                    except Exception:
-                        self.page = page
-            elif current_url.strip() == "about:blank" and target_url and kept_target:
+                target_pages.append(page)
+            elif current_url == "about:blank":
+                blank_pages.append(page)
+        if target_pages:
+            target_keep = target_pages[0]
+            if keep_page in target_pages:
+                target_keep = keep_page
+            self.page = target_keep
+            for page in target_pages:
+                if page is target_keep:
+                    continue
+                try:
+                    page.close()
+                except Exception:
+                    pass
+            for page in blank_pages:
+                if page is target_keep:
+                    continue
+                try:
+                    page.close()
+                except Exception:
+                    pass
+            return
+        for page in pages:
+            if page is keep_page:
+                continue
+            try:
+                current_url = str(page.url or "").strip()
+            except Exception:
+                current_url = ""
+            if current_url == "about:blank" and keep_page is not None:
                 try:
                     page.close()
                 except Exception:

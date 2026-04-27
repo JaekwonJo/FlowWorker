@@ -17,6 +17,7 @@ StatusDetailFn = Callable[[str], None]
 QueueFn = Callable[[int, str, str, str], None]
 StopFn = Callable[[], bool]
 PauseFn = Callable[[], bool]
+ActionFn = Callable[[str], None]
 
 
 @dataclass
@@ -32,6 +33,7 @@ class FlowAutomationEngine:
         self._log_fn: LogFn = lambda _message: None
         self._status_fn: StatusFn = lambda _message: None
         self._status_detail_fn: StatusDetailFn = lambda _message: None
+        self._action_fn: ActionFn = lambda _message: None
 
     def build_plan(self) -> RunPlan:
         prompt_slots = list(self.cfg.get("prompt_slots") or [])
@@ -62,10 +64,12 @@ class FlowAutomationEngine:
         should_stop: StopFn,
         is_paused: PauseFn,
         browser: BrowserManager,
+        action_log: ActionFn | None = None,
     ) -> None:
         self._log_fn = log
         self._status_fn = set_status
         self._status_detail_fn = set_status_detail
+        self._action_fn = action_log or (lambda _message: None)
         if not plan.items:
             set_status("선택된 작업 없음")
             set_status_detail("")
@@ -116,6 +120,7 @@ class FlowAutomationEngine:
         generate_wait = max(0.5, float(self.cfg.get("generate_wait_seconds", 10.0) or 10.0))
         next_wait = max(0.0, float(self.cfg.get("next_prompt_wait_seconds", 7.0) or 7.0))
         image_quality = self._download_quality("image")
+        failed_count = 0
 
         for item in plan.items:
             if should_stop():
@@ -192,12 +197,18 @@ class FlowAutomationEngine:
                         is_paused=is_paused,
                     )
             except Exception as exc:
+                failed_count += 1
                 update_queue(item.number, "failed", str(exc), "")
                 log(f"실패: {item.tag} | {exc}")
 
-        set_status("이미지 모드 작업 완료")
-        set_status_detail("생성 + 다운로드 원스톱 완료")
-        log("이미지 모드: 프롬프트 제출과 이미지 다운로드까지 완료했습니다.")
+        if failed_count > 0:
+            set_status("이미지 모드 일부 실패")
+            set_status_detail(f"실패 {failed_count}개 | 로그와 액션 트레이스 확인")
+            log(f"이미지 모드: 일부 실패가 있어 액션 트레이스 확인이 필요합니다. 실패 {failed_count}개")
+        else:
+            set_status("이미지 모드 작업 완료")
+            set_status_detail("생성 + 다운로드 원스톱 완료")
+            log("이미지 모드: 프롬프트 제출과 이미지 다운로드까지 완료했습니다.")
 
     def _wait_if_paused(self, *, is_paused: PauseFn, should_stop: StopFn, set_status: StatusFn, set_status_detail: StatusDetailFn) -> None:
         announced = False
@@ -266,6 +277,12 @@ class FlowAutomationEngine:
     def _emit_status_detail(self, message: str) -> None:
         try:
             self._status_detail_fn(str(message))
+        except Exception:
+            pass
+
+    def _emit_action(self, message: str) -> None:
+        try:
+            self._action_fn(str(message))
         except Exception:
             pass
 
@@ -765,6 +782,7 @@ class FlowAutomationEngine:
         return parts
 
     def _type_prompt_inline_text_chunk(self, page, text: str) -> None:
+        self._emit_action(f"inline 텍스트 직선 입력 시작 | len={len(str(text or ''))}")
         for ch in str(text or ""):
             if ch == "\n":
                 page.keyboard.press("Shift+Enter")
@@ -781,6 +799,7 @@ class FlowAutomationEngine:
                 time.sleep(random.uniform(0.02, 0.08))
             else:
                 time.sleep(random.uniform(0.008, 0.045))
+        self._emit_action("inline 텍스트 직선 입력 완료")
 
     def _prompt_reference_search_input_candidates(self) -> list[str]:
         cands = []
@@ -818,18 +837,20 @@ class FlowAutomationEngine:
             return False
         if height < 18.0 or height > 40.0:
             return False
-        if y < 8.0 or y > 180.0:
+        if y < 8.0 or y > 560.0:
             return False
-        if x < 80.0 or x > 860.0:
+        if x < 40.0 or x > 980.0:
             return False
         return True
 
     def _resolve_prompt_reference_search_overlay_input(self, page, timeout_sec: float = 2.0):
         end_ts = time.time() + max(0.8, float(timeout_sec))
+        best_dump: list[tuple[float, str, str, dict]] = []
         while time.time() < end_ts:
             best = None
             best_sel = None
             best_score = float("-inf")
+            dump_rows: list[tuple[float, str, str, dict]] = []
             for sel in self._prompt_reference_search_input_candidates():
                 try:
                     loc = page.locator(sel)
@@ -863,13 +884,33 @@ class FlowAutomationEngine:
                     score -= abs((float(box["x"]) + float(box["width"]) * 0.5) - 420.0) * 0.22
                     if float(box["y"]) <= 180.0:
                         score += 120.0
+                    elif float(box["y"]) <= 420.0:
+                        score += 240.0
+                    dump_rows.append((score, sel, meta[:120], {"x": float(box["x"]), "y": float(box["y"]), "width": float(box["width"]), "height": float(box["height"])}))
                     if score > best_score:
                         best = cand
                         best_sel = sel
                         best_score = score
+            if dump_rows:
+                best_dump = sorted(dump_rows, key=lambda row: row[0], reverse=True)[:8]
             if best is not None and best_score > 120.0:
+                self._emit_action("레퍼런스 검색창 후보 상위")
+                for idx, row in enumerate(best_dump, start=1):
+                    box = row[3]
+                    self._emit_action(
+                        f"  {idx:02d}. score={row[0]:.1f} sel={row[1]} meta='{row[2]}' "
+                        f"box=({box['x']:.1f},{box['y']:.1f},{box['width']:.1f},{box['height']:.1f})"
+                    )
                 return best, best_sel or ""
             time.sleep(0.12)
+        if best_dump:
+            self._emit_action("레퍼런스 검색창 후보 덤프(실패)")
+            for idx, row in enumerate(best_dump, start=1):
+                box = row[3]
+                self._emit_action(
+                    f"  {idx:02d}. score={row[0]:.1f} sel={row[1]} meta='{row[2]}' "
+                    f"box=({box['x']:.1f},{box['y']:.1f},{box['width']:.1f},{box['height']:.1f})"
+                )
         return None, None
 
     def _direct_fill_prompt_reference_search_via_dom(self, page, asset_tag: str):
@@ -909,7 +950,7 @@ class FlowAutomationEngine:
                         const r = el.getBoundingClientRect();
                         if (r.width < 180 || r.width > 980) continue;
                         if (r.height < 18 || r.height > 40) continue;
-                        if (r.top < 8 || r.top > 180) continue;
+                        if (r.top < 8 || r.top > 560) continue;
                         const meta = metaText(el);
                         let score = 0;
                         if (searchKeys.some((k) => meta.includes(k))) score += 600;
@@ -963,16 +1004,21 @@ class FlowAutomationEngine:
                 before_text = self._read_input_text(input_locator)
                 try:
                     if method == "page_type_at":
+                        self._emit_action("레퍼런스 @ 트리거 입력: page type('@')")
                         page.keyboard.type("@")
                     elif method == "locator_type_at":
+                        self._emit_action("레퍼런스 @ 트리거 입력: locator type('@')")
                         input_locator.type("@", delay=random.randint(24, 70), timeout=1200)
                     elif method == "page_shift2":
+                        self._emit_action("레퍼런스 @ 트리거 입력: page Shift+2")
                         page.keyboard.down("Shift")
                         page.keyboard.press("2")
                         page.keyboard.up("Shift")
                     elif method == "locator_shift2":
+                        self._emit_action("레퍼런스 @ 트리거 입력: locator Shift+2")
                         input_locator.press("Shift+2", timeout=1200)
                     else:
+                        self._emit_action("레퍼런스 @ 트리거 입력: js dispatch")
                         page.evaluate(
                             """() => {
                                 const el = document.activeElement;
@@ -1009,6 +1055,7 @@ class FlowAutomationEngine:
                 search_input, search_sel = self._resolve_prompt_reference_search_overlay_input(page, timeout_sec=0.9)
                 if search_input is not None and typed_at:
                     self._emit_log(f"🔡 레퍼런스 @ 호출 성공: {method} -> {search_sel or '자동 탐색'}")
+                    self._emit_action(f"레퍼런스 @ 호출 성공: {method} -> {search_sel or '자동 탐색'}")
                     return search_input, search_sel or ""
                 try:
                     input_locator.focus(timeout=800)
@@ -1021,6 +1068,7 @@ class FlowAutomationEngine:
                         page.keyboard.press("Backspace")
                 except Exception:
                     pass
+                self._emit_action(f"레퍼런스 @ 호출 재시도: {method}")
                 time.sleep(0.10)
         raise RuntimeError(f"@ 레퍼런스 검색창 호출 실패 ({last_error})")
 
@@ -1072,12 +1120,15 @@ class FlowAutomationEngine:
         if filled is None:
             ok_dom, reason_dom = self._direct_fill_prompt_reference_search_via_dom(page, asset_tag)
             if not ok_dom:
+                self._emit_action(f"레퍼런스 검색창 직접입력 실패: {reason_dom}")
                 raise RuntimeError(f"레퍼런스 검색창을 찾지 못했습니다. ({reason_dom})")
             used_selector = used_selector or "DOM 직접입력"
             self._emit_log(f"🔎 레퍼런스 검색 입력: {asset_tag} ({used_selector})")
+            self._emit_action(f"레퍼런스 검색 입력: {asset_tag} ({used_selector})")
             return None, used_selector
         used_selector = used_selector or "자동 탐색"
         self._emit_log(f"🔎 레퍼런스 검색 입력: {asset_tag} ({used_selector})")
+        self._emit_action(f"레퍼런스 검색 입력: {asset_tag} ({used_selector})")
         return filled, used_selector
 
     def _resolve_prompt_reference_sort_button(self, page, search_input=None, timeout_sec: float = 1.6):
@@ -1168,6 +1219,7 @@ class FlowAutomationEngine:
         sort_button, sort_sel = self._resolve_prompt_reference_sort_button(page, search_input=search_input, timeout_sec=1.4)
         if sort_button is None:
             self._emit_log("⚠️ 레퍼런스 정렬 버튼을 찾지 못해 기본 정렬로 계속합니다.")
+            self._emit_action("레퍼런스 정렬 버튼 미탐지")
             return search_input
         try:
             sort_meta = self._locator_meta_text(sort_button)
@@ -1180,11 +1232,13 @@ class FlowAutomationEngine:
                 sort_box = None
             self._click_locator(page, sort_button)
             self._emit_log(f"↕️ 레퍼런스 정렬 버튼 클릭: {sort_sel or '자동 탐색'}")
+            self._emit_action(f"레퍼런스 정렬 버튼 클릭: {sort_sel or '자동 탐색'}")
             time.sleep(random.uniform(0.10, 0.22))
             order_button, _ = self._resolve_prompt_reference_sort_option(page, order="oldest", timeout_sec=1.4, anchor_box=sort_box)
             if order_button is not None:
                 self._click_locator(page, order_button)
                 self._emit_log("↕️ 레퍼런스 정렬 선택: 오래된 순")
+                self._emit_action("레퍼런스 정렬 선택: 오래된 순")
                 time.sleep(random.uniform(0.10, 0.20))
         refreshed_input, _ = self._resolve_prompt_reference_search_overlay_input(page, timeout_sec=1.0)
         return refreshed_input or search_input
@@ -1196,6 +1250,7 @@ class FlowAutomationEngine:
         self._emit_status(f"{asset_tag} 레퍼런스 첨부 중")
         self._emit_status_detail("Flow Classic Plus 방식으로 @ 태그 첨부 중")
         self._emit_log(f"🔖 레퍼런스 첨부 시작: {asset_tag}")
+        self._emit_action(f"레퍼런스 첨부 시작: {asset_tag}")
         search_input, _ = self._open_prompt_reference_search_via_keyboard(page, input_locator, timeout_sec=2.4)
         search_input = self._set_prompt_reference_sort_oldest(page, search_input=search_input)
         search_input, search_sel = self._fill_prompt_reference_search_input(page, search_input, asset_tag)
@@ -1204,6 +1259,7 @@ class FlowAutomationEngine:
         time.sleep(random.uniform(0.04, 0.10))
         page.keyboard.press("Enter")
         self._emit_log(f"✅ 레퍼런스 첨부 요청 완료: {asset_tag}")
+        self._emit_action(f"레퍼런스 Enter 선택: {asset_tag}")
         time.sleep(random.uniform(0.08, 0.18))
         return input_locator
 
