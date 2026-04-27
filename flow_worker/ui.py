@@ -74,6 +74,7 @@ class FlowWorkerApp:
         self.generate_wait_var = tk.StringVar()
         self.next_wait_var = tk.StringVar()
         self.status_var = tk.StringVar(value="준비 완료")
+        self.status_detail_var = tk.StringVar(value="")
         self.progress_var = tk.StringVar(value="0 / 0 (0.0%)")
         self.project_summary_var = tk.StringVar(value="사이트: flow")
         self.queue_summary_var = tk.StringVar(value="활성 0개 | 완료 0 | 실패 0 | 대기 0")
@@ -143,7 +144,8 @@ class FlowWorkerApp:
         top_right = tk.Frame(top, bg=self._bg("top_right_bg"), highlightbackground=self._bg("top_left_border"), highlightthickness=1)
         top_right.pack(side="left", fill="both", expand=True)
         tk.Label(top_right, text="현재 상태", bg=self._bg("top_right_bg"), fg="#D8E4FF", font=("Malgun Gothic", 10, "bold")).pack(anchor="e", padx=10, pady=(6, 1))
-        tk.Label(top_right, textvariable=self.status_var, bg=self._bg("top_right_bg"), fg=self._bg("status_fg"), font=("Malgun Gothic", 10, "bold"), wraplength=180, justify="right").pack(anchor="e", padx=10, pady=(0, 6))
+        tk.Label(top_right, textvariable=self.status_var, bg=self._bg("top_right_bg"), fg=self._bg("status_fg"), font=("Malgun Gothic", 10, "bold"), wraplength=220, justify="right").pack(anchor="e", padx=10, pady=(0, 2))
+        tk.Label(top_right, textvariable=self.status_detail_var, bg=self._bg("top_right_bg"), fg=self._bg("sub_fg"), font=("Consolas", 9), wraplength=220, justify="right").pack(anchor="e", padx=10, pady=(0, 6))
 
         action_row = tk.Frame(root, bg=self._bg("root_bg"))
         action_row.pack(fill="x", padx=10, pady=(0, 6))
@@ -752,6 +754,7 @@ class FlowWorkerApp:
                     plan=plan,
                     log=self.log,
                     set_status=self._threadsafe_status,
+                    set_status_detail=self._threadsafe_status_detail,
                     update_queue=self._threadsafe_queue_update,
                     should_stop=lambda: self.stop_requested,
                     is_paused=lambda: self.paused,
@@ -767,21 +770,27 @@ class FlowWorkerApp:
     def stop_all(self) -> None:
         self.stop_requested = True
         self.status_var.set("중지됨")
+        self.status_detail_var.set("")
         self.log("완전정지")
         self.browser.stop(close_window=False)
 
     def pause_run(self) -> None:
         self.paused = True
         self.status_var.set("일시정지")
+        self.status_detail_var.set("수동 일시정지")
         self.log("일시정지")
 
     def resume_run(self) -> None:
         self.paused = False
         self.status_var.set("재개됨")
+        self.status_detail_var.set("")
         self.log("재개")
 
     def _threadsafe_status(self, text: str) -> None:
         self.root.after(0, lambda value=text: self.status_var.set(value))
+
+    def _threadsafe_status_detail(self, text: str) -> None:
+        self.root.after(0, lambda value=text: self.status_detail_var.set(value))
 
     def _threadsafe_queue_update(self, number: int, status: str, message: str, file_name: str) -> None:
         def _apply() -> None:

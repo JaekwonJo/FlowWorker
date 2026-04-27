@@ -33,3 +33,6 @@
 - 2026-04-27: FlowWorker 기본 Edge 연결을 그록워커와 분리했다. 기본 프로필은 `runtime/flow_worker_edge_profile`, 기본 포트는 `127.0.0.1:9333`이다.
 - 2026-04-27: FlowWorker 이미지 모드 프롬프트 입력은 안정성용 복붙 방식에서 그록워커식 사람 타이핑 방식으로 바꿨다. 이제 기본값도 `typing_speed=1.0`, `humanize_typing=True`를 쓴다.
 - 2026-04-27: FlowWorker 설정 기본값은 이제 Flow Classic Plus 이미지/S자동화 워커 기준을 더 직접적으로 이어받는다. `start_url`, `input_selector`, `submit_selector`, 이미지/비디오 품질, 대기시간, Edge 창 위치 값까지 새 저장소 설정으로 가져오게 보강했다.
+- 2026-04-27: FlowWorker 이미지 모드는 이제 상단 상태칸에 `몇 초 남음`을 실시간으로 보여준다. 생성 후 대기, 다음 작업 대기 둘 다 0.1초 단위로 갱신한다.
+- 2026-04-27: FlowWorker Edge는 새 창을 처음부터 프로젝트 URL로 열지 않고 `about:blank` 한 장만 띄운 뒤 같은 창을 재사용하도록 바꿨다. 같은 프로젝트 탭이 여러 개 쌓이는 현상을 줄이기 위한 변경이다.
+- 2026-04-27: FlowWorker 이미지 모드는 이제 생성 후 카드의 더보기 메뉴를 찾아 다운로드를 시도하고, Playwright download 이벤트를 받아 사용자 저장 폴더로 직접 저장한다.

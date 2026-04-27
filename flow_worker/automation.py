@@ -12,6 +12,7 @@ from .prompt_parser import PromptBlock, compress_numbers, load_prompt_blocks
 
 LogFn = Callable[[str], None]
 StatusFn = Callable[[str], None]
+StatusDetailFn = Callable[[str], None]
 QueueFn = Callable[[int, str, str, str], None]
 StopFn = Callable[[], bool]
 PauseFn = Callable[[], bool]
@@ -52,6 +53,7 @@ class FlowAutomationEngine:
         plan: RunPlan,
         log: LogFn,
         set_status: StatusFn,
+        set_status_detail: StatusDetailFn,
         update_queue: QueueFn,
         should_stop: StopFn,
         is_paused: PauseFn,
@@ -59,11 +61,13 @@ class FlowAutomationEngine:
     ) -> None:
         if not plan.items:
             set_status("선택된 작업 없음")
+            set_status_detail("")
             return
 
         media_mode = str(self.cfg.get("media_mode") or "image").strip().lower()
         if media_mode != "image":
             set_status("비디오 모드는 다음 단계 예정")
+            set_status_detail("")
             log("비디오 모드는 아직 연결 전입니다. 이번 단계는 이미지 모드 핵심 자동화만 먼저 붙였습니다.")
             return
 
@@ -73,6 +77,7 @@ class FlowAutomationEngine:
             raise RuntimeError("Flow 프로젝트 URL이 비어 있습니다.")
 
         set_status("브라우저 준비 중")
+        set_status_detail("FlowWorker 전용 Edge 연결 중")
         log(f"브라우저 연결 준비: {project.get('name', '프로젝트')}")
         page = browser.ensure_page(
             url=project_url,
@@ -90,6 +95,7 @@ class FlowAutomationEngine:
             input_selector_hint = "#PINHOLE_TEXT_AREA_ELEMENT_ID, textarea, [role='textbox'], [contenteditable='true']"
 
         set_status("Flow 입력창 확인 중")
+        set_status_detail("페이지와 입력창 상태 확인 중")
         if not self._wait_until_input_visible(page, input_selector_hint, timeout_sec=18):
             self._try_open_new_project_if_needed(page, input_selector_hint, log=log)
         input_locator = self._wait_for_prompt_input(page, input_selector_hint)
@@ -98,23 +104,28 @@ class FlowAutomationEngine:
 
         self._apply_image_preset(page, input_locator, log=log)
         set_status("이미지 모드 준비 완료")
+        set_status_detail("프롬프트 제출 준비됨")
 
         generate_wait = max(0.5, float(self.cfg.get("generate_wait_seconds", 10.0) or 10.0))
         next_wait = max(0.0, float(self.cfg.get("next_prompt_wait_seconds", 7.0) or 7.0))
+        image_quality = self._download_quality("image")
 
         for item in plan.items:
             if should_stop():
                 set_status("중지됨")
+                set_status_detail("")
                 log("사용자 중지 요청으로 작업을 멈췄습니다.")
                 return
-            self._wait_if_paused(is_paused=is_paused, should_stop=should_stop, set_status=set_status)
+            self._wait_if_paused(is_paused=is_paused, should_stop=should_stop, set_status=set_status, set_status_detail=set_status_detail)
             if should_stop():
                 set_status("중지됨")
+                set_status_detail("")
                 return
 
             try:
                 update_queue(item.number, "running", f"{item.tag} 프롬프트 입력 중", "")
                 set_status(f"{item.tag} 입력 중")
+                set_status_detail("사람처럼 한 글자씩 입력 중")
                 input_locator = self._wait_for_prompt_input(page, input_selector_hint)
                 if input_locator is None:
                     raise RuntimeError("프롬프트 입력창을 다시 찾지 못했습니다.")
@@ -142,39 +153,91 @@ class FlowAutomationEngine:
                 log(f"생성 제출 완료: {item.tag} | 버튼={submit_hint or 'geometry'} | 확인={reason}")
                 update_queue(item.number, "waiting", f"{item.tag} 생성 요청 완료 | {generate_wait:.1f}초 대기", "")
                 set_status(f"{item.tag} 생성 대기 중")
-                self._sleep_with_control(generate_wait, should_stop=should_stop, is_paused=is_paused, set_status=set_status)
+                self._sleep_with_countdown(
+                    total_seconds=generate_wait,
+                    headline=f"{item.tag} 생성 대기 중",
+                    detail_prefix="다운로드 전 대기",
+                    set_status=set_status,
+                    set_status_detail=set_status_detail,
+                    should_stop=should_stop,
+                    is_paused=is_paused,
+                )
                 if should_stop():
                     set_status("중지됨")
+                    set_status_detail("")
                     return
 
-                update_queue(item.number, "success", "이미지 생성 요청 제출 완료", "")
+                update_queue(item.number, "downloading", f"{item.tag} 다운로드 시도 중 | {image_quality}", "")
+                set_status(f"{item.tag} 다운로드 중")
+                set_status_detail(f"이미지 {image_quality} 저장 준비")
+                saved_name = self._download_image_for_tag(page, item.tag, image_quality, log=log)
+                update_queue(item.number, "success", f"다운로드 완료 | {saved_name}", saved_name)
                 set_status(f"{item.tag} 다음 작업 대기")
+                set_status_detail("다음 작업으로 넘어가기 전 정리 중")
                 if next_wait > 0:
-                    self._sleep_with_control(next_wait, should_stop=should_stop, is_paused=is_paused, set_status=set_status)
+                    self._sleep_with_countdown(
+                        total_seconds=next_wait,
+                        headline=f"{item.tag} 다음 작업 대기",
+                        detail_prefix="다음 프롬프트 준비",
+                        set_status=set_status,
+                        set_status_detail=set_status_detail,
+                        should_stop=should_stop,
+                        is_paused=is_paused,
+                    )
             except Exception as exc:
                 update_queue(item.number, "failed", str(exc), "")
                 log(f"실패: {item.tag} | {exc}")
 
-        set_status("이미지 모드 1차 완료")
-        log("이미지 모드 1차: 프롬프트 제출 자동화까지 완료했습니다.")
+        set_status("이미지 모드 작업 완료")
+        set_status_detail("생성 + 다운로드 원스톱 완료")
+        log("이미지 모드: 프롬프트 제출과 이미지 다운로드까지 완료했습니다.")
 
-    def _wait_if_paused(self, *, is_paused: PauseFn, should_stop: StopFn, set_status: StatusFn) -> None:
+    def _wait_if_paused(self, *, is_paused: PauseFn, should_stop: StopFn, set_status: StatusFn, set_status_detail: StatusDetailFn) -> None:
         announced = False
         while is_paused() and not should_stop():
             if not announced:
                 set_status("일시정지")
+                set_status_detail("사용자 재개를 기다리는 중")
                 announced = True
             time.sleep(0.2)
 
-    def _sleep_with_control(self, seconds: float, *, should_stop: StopFn, is_paused: PauseFn, set_status: StatusFn) -> None:
+    def _sleep_with_control(self, seconds: float, *, should_stop: StopFn, is_paused: PauseFn, set_status: StatusFn, set_status_detail: StatusDetailFn) -> None:
         end_at = time.time() + max(0.0, float(seconds))
         while time.time() < end_at:
             if should_stop():
                 return
             if is_paused():
-                self._wait_if_paused(is_paused=is_paused, should_stop=should_stop, set_status=set_status)
+                self._wait_if_paused(is_paused=is_paused, should_stop=should_stop, set_status=set_status, set_status_detail=set_status_detail)
                 end_at = time.time() + max(0.0, end_at - time.time())
             time.sleep(0.15)
+
+    def _sleep_with_countdown(
+        self,
+        *,
+        total_seconds: float,
+        headline: str,
+        detail_prefix: str,
+        set_status: StatusFn,
+        set_status_detail: StatusDetailFn,
+        should_stop: StopFn,
+        is_paused: PauseFn,
+    ) -> None:
+        end_at = time.time() + max(0.0, float(total_seconds))
+        last_tick = None
+        while time.time() < end_at:
+            if should_stop():
+                return
+            if is_paused():
+                self._wait_if_paused(is_paused=is_paused, should_stop=should_stop, set_status=set_status, set_status_detail=set_status_detail)
+                end_at = time.time() + max(0.0, end_at - time.time())
+            remaining = max(0.0, end_at - time.time())
+            tick = int(remaining * 10)
+            if tick != last_tick:
+                set_status(headline)
+                set_status_detail(f"{detail_prefix} | {remaining:.1f}초 남음")
+                last_tick = tick
+            time.sleep(0.1)
+        set_status_detail("")
 
     def _current_project(self) -> dict:
         profiles = list(self.cfg.get("project_profiles") or [])
@@ -707,6 +770,240 @@ class FlowAutomationEngine:
                 continue
             if random.random() < 0.01:
                 time.sleep(random.uniform(0.08, 0.28))
+
+    def _resolve_download_dir(self) -> Path:
+        raw = str(self.cfg.get("download_output_dir") or "").strip()
+        path = Path(raw) if raw else (self.base_dir / "downloads")
+        if not path.is_absolute():
+            path = self.base_dir / path
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _download_quality(self, mode=None):
+        mode = "image" if mode == "image" else "video"
+        if mode == "image":
+            val = str(self.cfg.get("download_image_quality", self.cfg.get("image_quality", "1K")) or "1K").strip().upper()
+            return val if val in ("1K", "2K", "4K") else "1K"
+        val = str(self.cfg.get("download_video_quality", self.cfg.get("video_quality", "1080P")) or "1080P").strip().upper()
+        return val if val in ("720P", "1080P", "4K") else "1080P"
+
+    def _download_more_candidates(self):
+        return [
+            "button[aria-label*='더보기' i]",
+            "[role='button'][aria-label*='더보기' i]",
+            "button[aria-label*='more' i]",
+            "[role='button'][aria-label*='more' i]",
+            "button[title*='more' i]",
+            "button:has-text('...')",
+            "button:has-text('⋮')",
+        ]
+
+    def _download_menu_candidates(self):
+        return [
+            "button:has-text('다운로드')",
+            "[role='menuitem']:has-text('다운로드')",
+            "[role='button']:has-text('다운로드')",
+            "text=다운로드",
+            "button:has-text('Download')",
+            "[role='menuitem']:has-text('Download')",
+            "text=Download",
+        ]
+
+    def _download_quality_candidates(self, quality: str):
+        quality = str(quality or "").strip().upper()
+        cands = [
+            f"button:has-text('{quality}')",
+            f"[role='menuitem']:has-text('{quality}')",
+            f"[role='option']:has-text('{quality}')",
+            f"text={quality}",
+        ]
+        seen = set()
+        uniq = []
+        for item in cands:
+            if item not in seen:
+                uniq.append(item)
+                seen.add(item)
+        return uniq
+
+    def _find_card_box_for_tag(self, page, tag: str):
+        try:
+            return page.evaluate(
+                """(payload) => {
+                    const wanted = String(payload.tag || "").replace(/\\s+/g, "").toUpperCase();
+                    if (!wanted) return null;
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const r = el.getBoundingClientRect();
+                        if (!r || r.width < 20 || r.height < 12) return false;
+                        const st = window.getComputedStyle(el);
+                        return st && st.display !== 'none' && st.visibility !== 'hidden' && st.opacity !== '0';
+                    };
+                    const normalize = (value) => String(value || "").replace(/\\s+/g, "").toUpperCase();
+                    let best = null;
+                    let bestScore = -1e12;
+                    const nodes = document.querySelectorAll("div, span, p, button, li, article, section, a");
+                    for (const node of nodes) {
+                        if (!isVisible(node)) continue;
+                        const raw = (node.innerText || node.textContent || "").trim();
+                        if (!raw || raw.length > 120) continue;
+                        const normalized = normalize(raw);
+                        if (!normalized.includes(wanted)) continue;
+                        let host = node;
+                        let depth = 0;
+                        while (host.parentElement && depth < 6) {
+                            const parent = host.parentElement;
+                            if (!isVisible(parent)) break;
+                            const media = parent.querySelector("img, video, canvas");
+                            const rect = parent.getBoundingClientRect();
+                            if (media && rect.width >= 180 && rect.height >= 100) {
+                                host = parent;
+                            }
+                            depth += 1;
+                        }
+                        const r = host.getBoundingClientRect();
+                        if (!r || r.width < 180 || r.height < 100) continue;
+                        const score = (r.width * r.height) - (r.top * 180) - Math.abs(r.left - 120) * 12;
+                        if (score > bestScore) {
+                            bestScore = score;
+                            best = {x:r.left, y:r.top, width:r.width, height:r.height};
+                        }
+                    }
+                    return best;
+                }""",
+                {"tag": tag},
+            )
+        except Exception:
+            return None
+
+    def _resolve_more_button_near_box(self, page, box):
+        if not box:
+            return None, None
+        try:
+            loc = page.locator("button, [role='button']")
+            total = min(loc.count(), 250)
+        except Exception:
+            return None, None
+        right_top_x = float(box["x"]) + float(box["width"]) - 18.0
+        right_top_y = float(box["y"]) + 18.0
+        best = None
+        best_score = float("inf")
+        for i in range(total):
+            cand = loc.nth(i)
+            try:
+                if not cand.is_visible(timeout=500):
+                    continue
+                b = cand.bounding_box()
+            except Exception:
+                continue
+            if not b:
+                continue
+            if b["x"] < box["x"] - 24 or b["x"] > (box["x"] + box["width"] + 24):
+                continue
+            if b["y"] < box["y"] - 30 or b["y"] > (box["y"] + min(140, box["height"] * 0.45)):
+                continue
+            if b["width"] > 110 or b["height"] > 70:
+                continue
+            cx = b["x"] + b["width"] / 2.0
+            cy = b["y"] + b["height"] / 2.0
+            score = abs(cx - right_top_x) + abs(cy - right_top_y)
+            meta = self._locator_meta_text(cand)
+            if any(x in meta for x in ("더보기", "more", "menu", "...", "⋮", "︙")):
+                score -= 220.0
+            if any(x in meta for x in ("play", "pause", "재생", "scene", "장면", "favorite", "즐겨찾기", "reuse", "재사용", "신고", "copy", "복사", "delete", "삭제")):
+                score += 180.0
+            if score < best_score:
+                best_score = score
+                best = cand
+        if best is None:
+            return None, None
+        return best, "media-tile-top-right-button"
+
+    def _wait_for_download_event(self, page, click_fn, *, timeout_sec: float = 30.0):
+        downloads = []
+
+        def _on_download(download):
+            downloads.append(download)
+
+        page.on("download", _on_download)
+        try:
+            click_fn()
+            deadline = time.time() + max(1.0, float(timeout_sec))
+            while time.time() < deadline:
+                if downloads:
+                    return downloads[0]
+                time.sleep(0.2)
+            raise RuntimeError("다운로드 이벤트를 시작하지 못했습니다.")
+        finally:
+            try:
+                page.remove_listener("download", _on_download)
+            except Exception:
+                pass
+
+    def _download_timeout_sec(self, quality: str) -> float:
+        quality = str(quality or "").strip().upper()
+        if quality == "4K":
+            return 40.0
+        if quality == "2K":
+            return 30.0
+        return 24.0
+
+    def _save_download_file(self, download, tag: str) -> str:
+        output_dir = self._resolve_download_dir()
+        suggested = ""
+        try:
+            suggested = str(download.suggested_filename or "").strip()
+        except Exception:
+            suggested = ""
+        filename = suggested or f"{tag}.png"
+        target = output_dir / filename
+        if target.exists():
+            stem = target.stem
+            suffix = target.suffix or ".png"
+            index = 2
+            while True:
+                candidate = output_dir / f"{stem}_{index}{suffix}"
+                if not candidate.exists():
+                    target = candidate
+                    break
+                index += 1
+        download.save_as(str(target))
+        return target.name
+
+    def _download_image_for_tag(self, page, tag: str, quality: str, *, log: LogFn) -> str:
+        card_box = None
+        for _ in range(12):
+            card_box = self._find_card_box_for_tag(page, tag)
+            if card_box:
+                break
+            time.sleep(0.5)
+        if not card_box:
+            raise RuntimeError(f"{tag} 카드 위치를 찾지 못했습니다.")
+
+        page.mouse.move(float(card_box["x"]) + float(card_box["width"]) * 0.85, float(card_box["y"]) + 20.0, steps=8)
+        time.sleep(0.25)
+        more_loc, _ = self._resolve_more_button_near_box(page, card_box)
+        if more_loc is None:
+            more_loc, _ = self._resolve_best_locator(page, self._download_more_candidates(), timeout_ms=1200, prefer_enabled=False)
+        if more_loc is None:
+            raise RuntimeError("다운로드 더보기 버튼을 찾지 못했습니다.")
+
+        self._click_locator(page, more_loc)
+        time.sleep(0.35)
+        download_loc, _ = self._resolve_best_locator(page, self._download_menu_candidates(), timeout_ms=1400, prefer_enabled=False)
+        if download_loc is None:
+            raise RuntimeError("다운로드 메뉴를 찾지 못했습니다.")
+
+        def _click_download_path():
+            self._click_locator(page, download_loc)
+            time.sleep(0.35)
+            quality_loc, _ = self._resolve_best_locator(page, self._download_quality_candidates(quality), timeout_ms=1400, prefer_enabled=False)
+            if quality_loc is not None:
+                self._click_locator(page, quality_loc)
+
+        download = self._wait_for_download_event(page, _click_download_path, timeout_sec=self._download_timeout_sec(quality))
+        saved_name = self._save_download_file(download, tag)
+        log(f"다운로드 완료: {tag} -> {saved_name}")
+        return saved_name
 
     def _submit_candidates(self) -> list[str]:
         cands = []
