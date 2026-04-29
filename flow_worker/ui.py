@@ -376,7 +376,7 @@ class FlowWorkerApp:
         self.video_quality_var.set(str(self.cfg.get("video_quality") or "1080P"))
         self.generate_wait_var.set(str(self.cfg.get("generate_wait_seconds", 10.0) or 10.0))
         self.next_wait_var.set(str(self.cfg.get("next_prompt_wait_seconds", 7.0) or 7.0))
-        self.attach_url_var.set(f"FlowWorker 전용 Edge | {self.cfg.get('browser_attach_url', 'http://127.0.0.1:9333')}")
+        self.attach_url_var.set(f"MS Edge 연결 | {self.cfg.get('browser_attach_url', 'http://127.0.0.1:9222')}")
 
     def _write_vars_to_config(self) -> None:
         self.cfg["worker_name"] = self.worker_name_var.get().strip() or "Flow Worker1"
@@ -514,7 +514,7 @@ class FlowWorkerApp:
         project = profiles[project_index] if profiles else {"name": "기본 프로젝트", "url": self.cfg.get("flow_site_url", "")}
         media_label = "비디오" if str(self.cfg.get("media_mode") or "image") == "video" else "이미지"
         self.project_summary_var.set(f"사이트: flow | {media_label} | {project.get('name', '기본 프로젝트')}")
-        self.attach_url_var.set(f"FlowWorker 전용 Edge | {self.cfg.get('browser_attach_url', 'http://127.0.0.1:9333')}")
+        self.attach_url_var.set(f"MS Edge 연결 | {self.cfg.get('browser_attach_url', 'http://127.0.0.1:9222')}")
         if slots:
             slot_file = str((slots[prompt_index] or {}).get("file") or "")
             slot_path = self.base_dir / slot_file
@@ -687,8 +687,8 @@ class FlowWorkerApp:
         try:
             self.browser.open_project(
                 url=str(project.get("url") or ""),
-                profile_dir=str(self.base_dir / str(self.cfg.get("browser_profile_dir") or "runtime/flow_worker_edge_profile")),
-                attach_url=str(self.cfg.get("browser_attach_url") or "http://127.0.0.1:9333"),
+                profile_dir=str(self.base_dir / str(self.cfg.get("browser_profile_dir") or "runtime/edge_profile_1")),
+                attach_url=str(self.cfg.get("browser_attach_url") or "http://127.0.0.1:9222"),
                 window_cfg=self.cfg,
             )
             self.status_var.set("브라우저 준비 완료")

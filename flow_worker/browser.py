@@ -45,7 +45,7 @@ class BrowserManager:
 
             self.playwright = sync_playwright().start()
 
-        debug_port = self._port_from_attach_url(attach_url or "http://127.0.0.1:9333")
+        debug_port = self._port_from_attach_url(attach_url or "http://127.0.0.1:9222")
         if self.edge_process is None or self.edge_process.poll() is not None or self.debug_port != debug_port:
             self._launch_edge_process(profile_dir=profile_dir, url=url, debug_port=debug_port)
         self.debug_port = debug_port
@@ -109,11 +109,11 @@ class BrowserManager:
 
     @staticmethod
     def _port_from_attach_url(raw: str) -> int:
-        text = str(raw or "http://127.0.0.1:9333").strip()
+        text = str(raw or "http://127.0.0.1:9222").strip()
         try:
             return int(text.rsplit(":", 1)[-1])
         except Exception:
-            return 9333
+            return 9222
 
     @staticmethod
     def _pick_context(browser, target_url: str):
