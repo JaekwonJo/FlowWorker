@@ -69,8 +69,6 @@ class FlowWorkerApp:
         self.video_variant_var = tk.StringVar()
         self.image_quality_var = tk.StringVar()
         self.video_quality_var = tk.StringVar()
-        self.typing_speed_var = tk.DoubleVar()
-        self.humanize_typing_var = tk.BooleanVar()
         self.generate_wait_var = tk.StringVar()
         self.next_wait_var = tk.StringVar()
         self.status_var = tk.StringVar(value="준비 완료")
@@ -307,29 +305,6 @@ class FlowWorkerApp:
         self.manual_entry.pack(fill="x", pady=(6, 0))
         self._bind_entry_autosave(self.manual_entry, "개별 번호 변경")
 
-        speed_row = tk.Frame(parent, bg=self._bg("settings_bg"))
-        speed_row.pack(fill="x", padx=4, pady=(0, 6))
-        tk.Label(speed_row, text="타이핑 속도", bg=self._bg("settings_bg"), fg="#D8E4FF", font=("Malgun Gothic", 10)).pack(anchor="w")
-        self.speed_scale = tk.Scale(
-            speed_row,
-            from_=0.5,
-            to=2.0,
-            resolution=0.1,
-            orient="horizontal",
-            variable=self.typing_speed_var,
-            bg=self._bg("settings_bg"),
-            fg="#FFFFFF",
-            troughcolor=self._bg("chip_bg"),
-            highlightthickness=0,
-            command=lambda _v: self.auto_save("타이핑 속도 변경"),
-        )
-        self.speed_scale.pack(fill="x")
-
-        humanize_row = tk.Frame(parent, bg=self._bg("settings_bg"))
-        humanize_row.pack(fill="x", padx=4, pady=(0, 6))
-        tk.Label(humanize_row, text="인간처럼 입력", bg=self._bg("settings_bg"), fg="#D8E4FF", font=("Malgun Gothic", 10)).pack(side="left")
-        tk.Label(humanize_row, text="항상 ON", bg=self._bg("chip_bg"), fg=self._bg("status_fg"), font=("Malgun Gothic", 10, "bold"), padx=10, pady=3).pack(side="left", padx=(10, 0))
-
         wait_row_1 = tk.Frame(parent, bg=self._bg("settings_bg"))
         wait_row_1.pack(fill="x", padx=4, pady=(0, 6))
         tk.Label(wait_row_1, text="생성 후 다운로드 대기(초)", bg=self._bg("settings_bg"), fg="#D8E4FF", font=("Malgun Gothic", 10)).pack(side="left")
@@ -399,8 +374,6 @@ class FlowWorkerApp:
         self.video_variant_var.set(str(self.cfg.get("video_variant_count") or "x1"))
         self.image_quality_var.set(str(self.cfg.get("image_quality") or "1K"))
         self.video_quality_var.set(str(self.cfg.get("video_quality") or "1080P"))
-        self.typing_speed_var.set(float(self.cfg.get("typing_speed", 1.0) or 1.0))
-        self.humanize_typing_var.set(True)
         self.generate_wait_var.set(str(self.cfg.get("generate_wait_seconds", 10.0) or 10.0))
         self.next_wait_var.set(str(self.cfg.get("next_prompt_wait_seconds", 7.0) or 7.0))
         self.attach_url_var.set(f"FlowWorker 전용 Edge | {self.cfg.get('browser_attach_url', 'http://127.0.0.1:9333')}")
@@ -417,8 +390,6 @@ class FlowWorkerApp:
         self.cfg["video_variant_count"] = self.video_variant_var.get().strip() or "x1"
         self.cfg["image_quality"] = self.image_quality_var.get().strip().upper() or "1K"
         self.cfg["video_quality"] = self.video_quality_var.get().strip().upper() or "1080P"
-        self.cfg["typing_speed"] = round(float(self.typing_speed_var.get() or 1.0), 1)
-        self.cfg["humanize_typing"] = True
         self.cfg["generate_wait_seconds"] = self._float_or_default(self.generate_wait_var.get(), 10.0)
         self.cfg["next_prompt_wait_seconds"] = self._float_or_default(self.next_wait_var.get(), 7.0)
         self.cfg["window_geometry"] = self.root.geometry()

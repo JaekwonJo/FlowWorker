@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -659,54 +658,28 @@ class FlowAutomationEngine:
             page.keyboard.press("Backspace")
         except Exception:
             pass
-        self._type_text_human_like(page=page, text=prompt_text)
+        try:
+            input_locator.fill(prompt_text, timeout=2000)
+        except Exception:
+            try:
+                input_locator.evaluate(
+                    """(el, value) => {
+                        if (!el) return;
+                        el.focus();
+                        if ("value" in el) {
+                            el.value = value;
+                            el.dispatchEvent(new Event("input", {bubbles: true}));
+                            el.dispatchEvent(new Event("change", {bubbles: true}));
+                            return;
+                        }
+                        el.textContent = value;
+                        el.dispatchEvent(new InputEvent("input", {bubbles: true, data: value}));
+                    }""",
+                    prompt_text,
+                )
+            except Exception:
+                page.keyboard.insert_text(prompt_text)
         time.sleep(0.2)
-
-    def _typing_delay_ms(self) -> int:
-        speed = float(self.cfg.get("typing_speed", 1.0) or 1.0)
-        speed = max(0.5, min(2.0, speed))
-        base = 34
-        return max(8, int(base / speed))
-
-    def _humanize_enabled(self) -> bool:
-        return bool(self.cfg.get("humanize_typing", True))
-
-    def _type_text_human_like(self, *, page, text: str) -> None:
-        typo_pool = "abcdefghijklmnopqrstuvwxyz"
-        typed_since_pause = 0
-        base_delay_ms = self._typing_delay_ms()
-        for ch in str(text or ""):
-            if ch == "\n":
-                page.keyboard.press("Shift+Enter")
-                typed_since_pause = 0
-                time.sleep(random.uniform(0.05, 0.16))
-                continue
-
-            delay = max(8, int(base_delay_ms * random.uniform(0.7, 1.5)))
-            if self._humanize_enabled() and ch.isalpha() and random.random() < 0.015:
-                typo = random.choice(typo_pool)
-                if typo.lower() == ch.lower():
-                    typo = "x"
-                page.keyboard.type(typo, delay=delay)
-                time.sleep(random.uniform(0.03, 0.12))
-                page.keyboard.press("Backspace")
-                time.sleep(random.uniform(0.02, 0.08))
-
-            page.keyboard.type(ch, delay=delay)
-            typed_since_pause += 1
-
-            if not self._humanize_enabled():
-                continue
-            if ch in ",.;:)":
-                time.sleep(random.uniform(0.04, 0.14))
-                typed_since_pause = 0
-                continue
-            if ch == " " and typed_since_pause >= random.randint(6, 14):
-                time.sleep(random.uniform(0.06, 0.22))
-                typed_since_pause = 0
-                continue
-            if random.random() < 0.01:
-                time.sleep(random.uniform(0.08, 0.28))
 
     def _submit_candidates(self) -> list[str]:
         cands = []
