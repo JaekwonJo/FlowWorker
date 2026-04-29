@@ -43,6 +43,10 @@ class FlowAutomationEngine:
             extra_prefixes=("V",) if media_mode == "video" else (),
         )
         selected = self._filter_items(items)
+        if media_mode == "video":
+            selected = [item for item in selected if item.media_mode == "video"]
+        else:
+            selected = [item for item in selected if item.media_mode == "image"]
         image_count = sum(1 for item in selected if item.media_mode == "image")
         video_count = sum(1 for item in selected if item.media_mode == "video")
         routed_count = sum(1 for item in selected if item.route_end_tag)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import os
 import subprocess
 import threading
@@ -10,6 +11,7 @@ from tkinter import filedialog, messagebox, simpledialog
 from .automation import FlowAutomationEngine
 from .browser import BrowserManager
 from .config import CONFIG_FILE, load_config, next_prompt_slot_file, save_config
+from .legacy_worker_bridge import LegacyWorkerBridge
 from .prompt_parser import compress_numbers, summarize_prompt_file
 from .queue_state import QueueItem
 
@@ -28,11 +30,15 @@ class FlowWorkerApp:
         self.base_dir = Path(__file__).resolve().parent.parent
         self.cfg = load_config(self.base_dir, config_name=CONFIG_FILE)
         self.browser = BrowserManager(self.log)
+        self.backend = LegacyWorkerBridge(self.base_dir, self.log)
         self.queue_items: list[QueueItem] = []
         self.log_lines: list[str] = []
         self.run_thread: threading.Thread | None = None
         self.stop_requested = False
         self.paused = False
+        self.backend_last_log_lines: list[str] = []
+        self.backend_last_updated_at = ""
+        self.backend_active_mode = ""
         self.settings_collapsed = bool(self.cfg.get("settings_collapsed", False))
         self.log_panel_visible = bool(self.cfg.get("log_panel_visible", False))
         self._resize_drag_origin: tuple[int, int, int, int] | None = None
@@ -53,6 +59,7 @@ class FlowWorkerApp:
         self._apply_media_visibility()
         self._suspend_auto_save = False
         self.refresh_all()
+        self.root.after(400, self._poll_backend_state)
 
     def _build_vars(self) -> None:
         self.worker_name_var = tk.StringVar()
@@ -661,7 +668,7 @@ class FlowWorkerApp:
         self.log(f"번호 복사: {text or '(비어 있음)'}")
 
     def copy_failed_numbers(self) -> None:
-        failed = [item.tag for item in self.queue_items if item.status == "failed"]
+        failed = [self._queue_tag(item) for item in self.queue_items if self._queue_status(item) == "failed"]
         text = ",".join(failed)
         self.root.clipboard_clear()
         self.root.clipboard_append(text)
@@ -674,12 +681,14 @@ class FlowWorkerApp:
             messagebox.showwarning("안내", "프로젝트 URL을 먼저 입력해주세요.", parent=self.root)
             return
         try:
-            self.browser.open_project(
-                url=str(project.get("url") or ""),
-                profile_dir=str(self.base_dir / str(self.cfg.get("browser_profile_dir") or "runtime/edge_profile_1")),
-                attach_url=str(self.cfg.get("browser_attach_url") or "http://127.0.0.1:9222"),
-                window_cfg=self.cfg,
+            mode = self._current_backend_mode()
+            plan = FlowAutomationEngine(self.base_dir, self.cfg).build_plan()
+            self.backend.ensure_backend(
+                mode=mode,
+                ui_cfg=self.cfg,
+                plan_items=plan.items,
             )
+            self.backend.send_action("open_browser")
             self.status_var.set("브라우저 준비 완료")
             self.log("브라우저 작업봇 창 열기 완료")
         except Exception as exc:
@@ -688,47 +697,58 @@ class FlowWorkerApp:
             messagebox.showerror("브라우저 열기 실패", str(exc), parent=self.root)
 
     def start_run(self) -> None:
-        if self.run_thread and self.run_thread.is_alive():
-            self.log("이미 작업 스레드가 실행 중입니다.")
-            return
         self.stop_requested = False
         self.paused = False
         self.auto_save("시작 전 저장")
         plan = FlowAutomationEngine(self.base_dir, self.cfg).build_plan()
+        if not plan.items:
+            messagebox.showwarning("안내", "실행할 프롬프트가 없습니다.", parent=self.root)
+            self.log("실행할 프롬프트가 없습니다.")
+            return
         self.queue_items = [QueueItem(number=item.number, tag=item.tag, prompt=item.rendered_prompt) for item in plan.items]
         self._render_queue()
         self._refresh_progress_from_plan(plan.items)
         self.status_var.set("실행 준비 중")
         self.log(f"실행 시작: {plan.selection_summary}")
-
-        def _run() -> None:
-            engine = FlowAutomationEngine(self.base_dir, self.cfg)
-            engine.run(
-                plan=plan,
-                log=self.log,
-                set_status=self._threadsafe_status,
-                update_queue=self._threadsafe_queue_update,
-                should_stop=lambda: self.stop_requested,
+        try:
+            mode = self._current_backend_mode()
+            self.backend.ensure_backend(
+                mode=mode,
+                ui_cfg=self.cfg,
+                plan_items=plan.items,
             )
-
-        self.run_thread = threading.Thread(target=_run, daemon=True)
-        self.run_thread.start()
+            self.backend.send_action("start")
+        except Exception as exc:
+            self.status_var.set("실행 실패")
+            self.log(f"실행 실패: {exc}")
+            messagebox.showerror("실행 실패", str(exc), parent=self.root)
 
     def stop_all(self) -> None:
         self.stop_requested = True
         self.status_var.set("중지됨")
         self.log("완전정지")
-        self.browser.stop(close_window=False)
+        try:
+            self.backend.send_action("stop")
+        except Exception:
+            pass
 
     def pause_run(self) -> None:
         self.paused = True
         self.status_var.set("일시정지")
         self.log("일시정지")
+        try:
+            self.backend.send_action("pause")
+        except Exception:
+            pass
 
     def resume_run(self) -> None:
         self.paused = False
         self.status_var.set("재개됨")
         self.log("재개")
+        try:
+            self.backend.send_action("resume")
+        except Exception:
+            pass
 
     def _threadsafe_status(self, text: str) -> None:
         self.root.after(0, lambda value=text: self.status_var.set(value))
@@ -773,7 +793,7 @@ class FlowWorkerApp:
             tk.Label(self.queue_inner, text="아직 대기열이 없습니다.\n작업봇 창 열기나 시작을 누르면 여기에 상태가 쌓입니다.", bg=self._bg("queue_panel_bg"), fg=self._bg("sub_fg"), justify="left").pack(anchor="w", padx=10, pady=10)
         else:
             for item in self.queue_items:
-                status = str(item.status or "pending").strip().lower()
+                status = self._queue_status(item)
                 if status in ("running", "waiting", "downloading"):
                     active += 1
                 elif status == "success":
@@ -792,8 +812,8 @@ class FlowWorkerApp:
                 }.get(status, "#233042")
                 card = tk.Frame(self.queue_inner, bg=color, highlightbackground=self._bg("queue_panel_border"), highlightthickness=1)
                 card.pack(fill="x", pady=(0, 8))
-                tk.Label(card, text=item.tag, bg=color, fg="#FFFFFF", font=("Malgun Gothic", 10, "bold")).pack(anchor="w", padx=10, pady=(8, 2))
-                detail = item.message or item.prompt
+                tk.Label(card, text=self._queue_tag(item), bg=color, fg="#FFFFFF", font=("Malgun Gothic", 10, "bold")).pack(anchor="w", padx=10, pady=(8, 2))
+                detail = self._queue_message(item) or self._queue_prompt(item)
                 tk.Label(card, text=detail[:160], bg=color, fg="#E8F1FF", justify="left", wraplength=620).pack(anchor="w", padx=10, pady=(0, 8))
         self.queue_summary_var.set(f"활성 {active}개 | 완료 {success} | 실패 {failed} | 대기 {pending}")
         self._update_queue_scroll()
@@ -822,6 +842,93 @@ class FlowWorkerApp:
         self.log_lines = self.log_lines[-200:]
         self._render_log()
 
+    def _current_backend_mode(self) -> str:
+        return "asset" if str(self.cfg.get("media_mode") or "image").strip().lower() == "video" else "prompt"
+
+    def _poll_backend_state(self) -> None:
+        try:
+            state = self.backend.read_state()
+            if state:
+                self._apply_backend_state(state)
+        except Exception as exc:
+            self.log(f"백엔드 상태 읽기 실패: {exc}")
+        finally:
+            self.root.after(500, self._poll_backend_state)
+
+    def _apply_backend_state(self, state: dict) -> None:
+        updated_at = str(state.get("updated_at") or "").strip()
+        if updated_at and updated_at == self.backend_last_updated_at:
+            return
+        self.backend_last_updated_at = updated_at
+        self.backend_active_mode = str(state.get("worker_mode") or "").strip().lower()
+        status_text = str(state.get("status_text") or "").strip()
+        progress_text = str(state.get("progress_text") or "").strip()
+        queue_summary = str(state.get("queue_summary") or "").strip()
+        if status_text:
+            self.status_var.set(status_text)
+        if progress_text:
+            self.progress_var.set(progress_text)
+            self._apply_progress_bar_from_text(progress_text)
+        if queue_summary:
+            self.queue_summary_var.set(queue_summary)
+        queue_items = state.get("queue_items")
+        if isinstance(queue_items, list):
+            self.queue_items = list(queue_items)
+            self._render_queue()
+        remote_logs = list(state.get("log_lines") or [])
+        self._merge_backend_logs(remote_logs)
+
+    def _merge_backend_logs(self, remote_logs: list[str]) -> None:
+        if not remote_logs:
+            return
+        prev = list(self.backend_last_log_lines or [])
+        new_lines = remote_logs
+        if prev and len(remote_logs) >= len(prev) and remote_logs[: len(prev)] == prev:
+            new_lines = remote_logs[len(prev):]
+        elif prev and remote_logs == prev[-len(remote_logs):]:
+            new_lines = []
+        for line in new_lines:
+            if line not in self.log_lines[-120:]:
+                self.log_lines.append(line)
+        self.log_lines = self.log_lines[-220:]
+        self.backend_last_log_lines = list(remote_logs)
+        self._render_log()
+
+    def _apply_progress_bar_from_text(self, text: str) -> None:
+        match = re.search(r"\(([\d.]+)%\)", str(text or ""))
+        if not match:
+            return
+        try:
+            pct = float(match.group(1))
+        except Exception:
+            return
+        width = max(0.0, min(230.0, 230.0 * (pct / 100.0)))
+        self.progress_canvas.coords(self.progress_fill, 0, 0, width, 18)
+
+    @staticmethod
+    def _queue_status(item) -> str:
+        if isinstance(item, dict):
+            return str(item.get("status") or "pending").strip().lower()
+        return str(getattr(item, "status", "pending") or "pending").strip().lower()
+
+    @staticmethod
+    def _queue_tag(item) -> str:
+        if isinstance(item, dict):
+            return str(item.get("token") or item.get("tag") or "-").strip()
+        return str(getattr(item, "tag", "-") or "-").strip()
+
+    @staticmethod
+    def _queue_message(item) -> str:
+        if isinstance(item, dict):
+            return str(item.get("detail") or item.get("message") or "").strip()
+        return str(getattr(item, "message", "") or "").strip()
+
+    @staticmethod
+    def _queue_prompt(item) -> str:
+        if isinstance(item, dict):
+            return str(item.get("prompt") or "").strip()
+        return str(getattr(item, "prompt", "") or "").strip()
+
     def _start_resize_drag(self, event) -> None:
         self._resize_drag_origin = (event.x_root, event.y_root, self.root.winfo_width(), self.root.winfo_height())
 
@@ -838,6 +945,10 @@ class FlowWorkerApp:
 
     def on_close(self) -> None:
         self.manual_save()
+        try:
+            self.backend.shutdown()
+        except Exception:
+            pass
         self.browser.stop(close_window=False)
         self.root.destroy()
 
