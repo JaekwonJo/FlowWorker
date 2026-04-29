@@ -137,15 +137,13 @@ class BrowserManager:
         pages = [page for page in list(context.pages or []) if page and (not page.is_closed())]
         target_url = str(target_url or "").strip()
         kept_target = False
-        keep_has_target = False
-        try:
-            if keep_page is not None and target_url:
-                keep_has_target = target_url in str(keep_page.url or "")
-        except Exception:
-            keep_has_target = False
         for page in pages:
             if page == keep_page:
-                kept_target = keep_has_target
+                if target_url:
+                    try:
+                        kept_target = target_url in str(page.url or "")
+                    except Exception:
+                        pass
                 continue
             try:
                 current_url = str(page.url or "")
@@ -159,18 +157,6 @@ class BrowserManager:
                         pass
                 else:
                     kept_target = True
-                    try:
-                        if keep_page is not None and not keep_page.is_closed() and str(keep_page.url or "").strip() == "about:blank":
-                            keep_page.close()
-                            keep_page = page
-                        self.page = page
-                    except Exception:
-                        self.page = page
-            elif current_url.strip() == "about:blank" and target_url and kept_target:
-                try:
-                    page.close()
-                except Exception:
-                    pass
 
     @staticmethod
     def _port_from_attach_url(raw: str) -> int:
