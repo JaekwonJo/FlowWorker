@@ -1545,66 +1545,352 @@ class FlowAutomationEngine:
         self._emit_action("다운로드 검색어 초기화")
         time.sleep(0.12)
 
-    def _detect_download_result_progress(self, page):
+    def _normalize_download_tag(self, tag) -> str:
+        normalized = self._normalize_reference_asset_tag(tag)
+        if normalized:
+            return normalized
+        return str(tag or "").strip().upper()
+
+    def _normalize_download_search_text(self, text) -> str:
+        return re.sub(r"\s+", "", str(text or "").strip()).upper()
+
+    def _download_tag_patterns(self, tag) -> list[str]:
+        normalized = self._normalize_download_tag(tag)
+        compact = self._normalize_download_search_text(normalized)
+        patterns = [compact] if compact else []
+        match = re.match(r"^([A-Z]+)(0*)([1-9][0-9]*)$", compact)
+        if match:
+            prefix = match.group(1)
+            number = str(int(match.group(3)))
+            patterns.append(f"{prefix}{number}")
+        return list(dict.fromkeys([x for x in patterns if x]))
+
+    def _download_page_contains_tag(self, page, tag: str) -> bool:
+        patterns = self._download_tag_patterns(tag)
+        if not patterns:
+            return False
         try:
-            return page.evaluate(
+            matched = page.evaluate(
+                """(patterns) => {
+                    const normalize = (value) => String(value || "").replace(/\\s+/g, "").toUpperCase();
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const r = el.getBoundingClientRect();
+                        if (!r || r.width < 16 || r.height < 12) return false;
+                        const st = window.getComputedStyle(el);
+                        return st && st.display !== 'none' && st.visibility !== 'hidden' && st.opacity !== '0';
+                    };
+                    const nodes = document.querySelectorAll("div, span, p, button, li, article, section, a");
+                    for (const node of nodes) {
+                        if (!isVisible(node)) continue;
+                        const raw = (node.innerText || node.textContent || "").trim();
+                        if (!raw || raw.length > 80) continue;
+                        const normalized = normalize(raw);
+                        if (!normalized) continue;
+                        if (patterns.some((pattern) => normalized.includes(String(pattern || '').toUpperCase()))) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }""",
+                patterns,
+            )
+        except Exception:
+            return False
+        return bool(matched)
+
+    def _probe_download_search_result_state(self, page, tag: str):
+        if not tag:
+            return "pending", ""
+        expected = str(tag or "").strip().lower()
+        try:
+            result = page.evaluate(
+                """(payload) => {
+                    const expected = String(payload.tag || "").trim().toLowerCase();
+                    const emptyHits = [
+                        "일치하는 결과 없음",
+                        "선택한 항목과 일치하는 결과가 없습니다",
+                        "no matching results",
+                        "no results",
+                    ];
+                    const failurePrimary = [
+                        "문제가 발생했습니다",
+                        "정책 위반",
+                        "google 정책",
+                        "google policy",
+                        "may violate google policy",
+                    ];
+                    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const rect = el.getBoundingClientRect();
+                        if (!rect || rect.width < 24 || rect.height < 16) return false;
+                        const style = window.getComputedStyle(el);
+                        return style && style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
+                    };
+                    const isInputLike = (el) => {
+                        if (!el) return false;
+                        const tag = String(el.tagName || "").toLowerCase();
+                        if (tag === "input" || tag === "textarea") return true;
+                        if (el.isContentEditable) return true;
+                        const role = String(el.getAttribute("role") || "").toLowerCase();
+                        return role === "textbox" || role === "searchbox";
+                    };
+                    const nodes = document.querySelectorAll("div, li, button, span, p, a, h1, h2, h3, article, section");
+                    let emptyReason = "";
+                    let failureReason = "";
+                    let found = false;
+                    for (const node of nodes) {
+                        if (!isVisible(node)) continue;
+                        if (isInputLike(node)) continue;
+                        if (node.querySelector("input, textarea, [role='textbox'], [role='searchbox'], [contenteditable='true']")) continue;
+                        const rect = node.getBoundingClientRect();
+                        if (rect.top < 0 || rect.top > window.innerHeight * 0.94) continue;
+                        if (rect.left < 0 || rect.left > window.innerWidth * 0.96) continue;
+                        if (rect.width > window.innerWidth * 0.98 && rect.height > window.innerHeight * 0.80) continue;
+                        const text = clean(node.innerText || "");
+                        if (!text || text.length > 260) continue;
+                        const lower = text.toLowerCase();
+                        if (!emptyReason && emptyHits.some((hit) => lower.includes(hit))) {
+                            emptyReason = text.slice(0, 180);
+                        }
+                        if (!failureReason) {
+                            const hasFailWord = lower.includes("실패");
+                            const hasFailureBody = failurePrimary.some((hit) => lower.includes(hit));
+                            if (hasFailureBody || (hasFailWord && (lower.includes("문제가 발생했습니다") || lower.includes("정책 위반")))) {
+                                failureReason = text.slice(0, 180);
+                            }
+                        }
+                        if (!found) {
+                            const lines = text.split(/\\n+/).map(clean).filter(Boolean);
+                            if (lines.some((line) => line.toLowerCase() === expected)) {
+                                found = true;
+                            }
+                        }
+                    }
+                    if (emptyReason) return {state: "empty", reason: emptyReason};
+                    if (failureReason) return {state: "failure", reason: failureReason};
+                    if (found) return {state: "found", reason: expected};
+                    return {state: "pending", reason: ""};
+                }""",
+                {"tag": expected},
+            ) or {}
+            state = str((result or {}).get("state", "") or "").strip().lower()
+            reason = str((result or {}).get("reason", "") or "").strip()
+            if state in ("empty", "failure", "found"):
+                return state, reason
+        except Exception:
+            pass
+        return "pending", ""
+
+    def _download_search_input_matches_tag(self, search_loc, tag):
+        if search_loc is None:
+            return False
+        expected = self._normalize_download_search_text(tag)
+        if not expected:
+            return False
+        try:
+            current = self._normalize_download_search_text(self._read_input_text(search_loc))
+            return bool(current) and current == expected
+        except Exception:
+            return False
+
+    def _download_card_candidates(self):
+        cands = [
+            "article",
+            "[role='listitem']",
+            "div[class*='card' i]",
+            "div[class*='tile' i]",
+            "div[data-testid*='card' i]",
+            "li",
+            "section",
+        ]
+        seen = set()
+        uniq = []
+        for item in cands:
+            if item not in seen:
+                uniq.append(item)
+                seen.add(item)
+        return uniq
+
+    def _download_card_matches_tag(self, card_loc, tag):
+        if card_loc is None:
+            return False, ""
+        meta = self._normalize_download_search_text(self._locator_meta_text(card_loc))
+        if not meta:
+            return False, ""
+        for pattern in self._download_tag_patterns(tag):
+            if pattern and pattern in meta:
+                return True, meta
+        return False, meta
+
+    def _reject_download_card_candidate(self, locator, selector=None):
+        meta = self._normalize_download_search_text(self._locator_meta_text(locator))
+        if not meta:
+            return False
+        noisy_tokens = (
+            "CHECK_CIRCLE",
+            "업스케일링이완료",
+            "업스케일링",
+            "완료되었습니다",
+            "닫기",
+            "CLOSE",
+            "SNACKBAR",
+            "TOAST",
+            "ALERT",
+            "NOTICE",
+            "알림",
+            "완료",
+        )
+        return any(token in meta for token in noisy_tokens)
+
+    def _score_download_card_candidate(self, page, locator, selector, tag):
+        if locator is None:
+            return float("-inf"), False, ""
+        try:
+            box = locator.bounding_box()
+        except Exception:
+            box = None
+        if not box:
+            return float("-inf"), False, ""
+        width = float(box.get("width") or 0.0)
+        height = float(box.get("height") or 0.0)
+        x = float(box.get("x") or 0.0)
+        y = float(box.get("y") or 0.0)
+        if width < 150.0 or height < 90.0:
+            return float("-inf"), False, ""
+        viewport_w = 1600.0
+        viewport_h = 900.0
+        try:
+            viewport_w = float(page.evaluate("window.innerWidth") or viewport_w)
+            viewport_h = float(page.evaluate("window.innerHeight") or viewport_h)
+        except Exception:
+            pass
+        area = width * height
+        if width >= (viewport_w * 0.92) and height >= (viewport_h * 0.58):
+            return float("-inf"), False, ""
+        if area > (viewport_w * viewport_h * 0.52):
+            return float("-inf"), False, ""
+        meta = self._normalize_download_search_text(self._locator_meta_text(locator))
+        matched, _ = self._download_card_matches_tag(locator, tag)
+        score = 0.0
+        if matched:
+            score += 5000.0
+        try:
+            detail = locator.evaluate(
+                """(el) => {
+                    const media = el.querySelectorAll ? el.querySelectorAll("img, video, canvas").length : 0;
+                    const buttons = el.querySelectorAll ? el.querySelectorAll("button, [role='button']").length : 0;
+                    const cls = String(el.className || "").toLowerCase();
+                    const role = String(el.getAttribute("role") || "").toLowerCase();
+                    const tag = String(el.tagName || "").toLowerCase();
+                    return { media, buttons, cls, role, tag };
+                }"""
+            ) or {}
+        except Exception:
+            detail = {}
+        media_count = int(detail.get("media") or 0)
+        button_count = int(detail.get("buttons") or 0)
+        cls = str(detail.get("cls") or "")
+        role = str(detail.get("role") or "")
+        tag_name = str(detail.get("tag") or "")
+        selector_l = str(selector or "").lower()
+        if media_count > 0:
+            score += 320.0
+        if button_count > 0:
+            score += 70.0
+        if tag_name == "article":
+            score += 140.0
+        if role == "listitem":
+            score += 110.0
+        if any(token in cls for token in ("card", "tile", "result", "item", "media")):
+            score += 120.0
+        if any(token in selector_l for token in ("article", "listitem", "card", "tile", "result")):
+            score += 80.0
+        if 180.0 <= width <= 760.0:
+            score += 120.0
+        elif width > 980.0:
+            score -= 260.0
+        if 120.0 <= height <= 620.0:
+            score += 120.0
+        elif height > 760.0:
+            score -= 260.0
+        score -= (y * 0.38)
+        score -= (x * 0.08)
+        if any(token in meta for token in ("DOWNLOAD", "다운로드", "UPSCALE", "업스케일", "TOAST", "ALERT", "NOTICE")):
+            score -= 800.0
+        if any(token in meta for token in ("FILTER", "필터", "SEARCH", "검색")):
+            score -= 500.0
+        return score, matched, meta
+
+    def _resolve_download_card_for_tag(self, page, tag, timeout_sec=6):
+        end_ts = time.time() + max(1, timeout_sec)
+        best_fallback = None
+        best_fallback_sel = None
+        best_fallback_meta = ""
+        best_fallback_score = float("-inf")
+        while time.time() < end_ts:
+            best_match = None
+            best_match_sel = None
+            best_match_meta = ""
+            best_match_score = float("-inf")
+            for sel in self._download_card_candidates():
+                try:
+                    loc = page.locator(sel)
+                    total = min(loc.count(), 40)
+                except Exception:
+                    continue
+                for idx in range(total):
+                    cand = loc.nth(idx)
+                    try:
+                        if not cand.is_visible(timeout=700):
+                            continue
+                    except Exception:
+                        continue
+                    if self._reject_download_card_candidate(cand, sel):
+                        continue
+                    score, matched, meta = self._score_download_card_candidate(page, cand, sel, tag)
+                    if score == float("-inf"):
+                        continue
+                    if matched and score > best_match_score:
+                        best_match = cand
+                        best_match_sel = sel
+                        best_match_meta = meta
+                        best_match_score = score
+                    if score > best_fallback_score:
+                        best_fallback = cand
+                        best_fallback_sel = sel
+                        best_fallback_meta = meta
+                        best_fallback_score = score
+            if best_match is not None:
+                return best_match, best_match_sel, best_match_meta
+            time.sleep(0.35)
+        return best_fallback, best_fallback_sel, best_fallback_meta
+
+    def _count_visible_media_tiles(self, page):
+        try:
+            return int(page.evaluate(
                 """() => {
                     const isVisible = (el) => {
                         if (!el) return false;
                         const r = el.getBoundingClientRect();
-                        if (!r || r.width < 12 || r.height < 12) return false;
+                        if (!r || r.width < 160 || r.height < 90) return false;
                         const st = window.getComputedStyle(el);
-                        return st && st.display !== 'none' && st.visibility !== 'hidden' && st.opacity !== '0';
+                        if (!st) return false;
+                        return st.display !== 'none' && st.visibility !== 'hidden' && st.opacity !== '0';
                     };
-                    const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
-                    const nodes = document.querySelectorAll('div, span, p, button');
-                    let percent = '';
-                    let reason = '';
-                    for (const node of nodes) {
-                        if (!isVisible(node)) continue;
-                        const rect = node.getBoundingClientRect();
-                        if (rect.top < 60 || rect.top > window.innerHeight * 0.82) continue;
-                        if (rect.left < 0 || rect.left > window.innerWidth * 0.96) continue;
-                        const text = clean(node.innerText || node.textContent || '');
-                        if (!text || text.length > 80) continue;
-                        const m = text.match(/\\b([1-9][0-9]?|100)%\\b/);
-                        if (m) {
-                            percent = m[0];
-                            reason = text;
-                            break;
-                        }
-                        const lower = text.toLowerCase();
-                        if (lower.includes('생성 중') || lower.includes('processing') || lower.includes('generating')) {
-                            reason = text;
-                            break;
-                        }
+                    let count = 0;
+                    for (const el of document.querySelectorAll("video, img, canvas")) {
+                        if (!isVisible(el)) continue;
+                        const r = el.getBoundingClientRect();
+                        if (r.top < 70) continue;
+                        count += 1;
                     }
-                    return {percent, reason};
+                    return count;
                 }"""
-            ) or {}
+            ) or 0)
         except Exception:
-            return {"percent": "", "reason": ""}
-
-    def _wait_until_download_result_ready(self, page, tag: str, *, timeout_sec: float = 90.0) -> None:
-        deadline = time.time() + max(3.0, float(timeout_sec))
-        seen_progress = ""
-        while time.time() < deadline:
-            progress = self._detect_download_result_progress(page) or {}
-            percent = str(progress.get("percent") or "").strip()
-            reason = str(progress.get("reason") or "").strip()
-            if percent or reason:
-                marker = percent or reason
-                if marker != seen_progress:
-                    seen_progress = marker
-                    self._emit_log(f"⏳ 검색 결과 생성 진행 감지: {marker}")
-                    self._emit_action(f"다운로드 대상 생성 진행 감지: {marker}")
-                time.sleep(1.0)
-                continue
-            result_state, _ = self._probe_download_search_result_state(tag)
-            if result_state in ("found", "pending"):
-                self._emit_action(f"다운로드 대상 준비 완료 추정: {tag}")
-                return
-            time.sleep(0.6)
+            return 0
 
     def _find_first_media_tile_box(self, page):
         try:
@@ -1923,33 +2209,45 @@ class FlowAutomationEngine:
 
     def _download_image_for_tag(self, page, tag: str, quality: str, *, log: LogFn) -> str:
         before_snapshot = self._scan_download_source_snapshot()
-        card_box = None
         search_fallback_used = False
-        for _ in range(12):
-            card_box = self._find_card_box_for_tag(page, tag)
-            if card_box:
-                break
-            time.sleep(0.5)
-        used_search_fallback = False
-        if not card_box:
+        card_box = None
+        card_loc = None
+        tile_count = 0
+        if not self._download_page_contains_tag(page, tag):
             self._emit_log(f"🔎 카드 직접 탐지 실패, 다운로드 검색으로 전환: {tag}")
             self._emit_action(f"카드 직접 탐지 실패 -> 다운로드 검색 전환: {tag}")
             if self._set_download_search_tag(page, tag):
                 search_fallback_used = True
-                self._wait_until_download_result_ready(page, tag, timeout_sec=max(30.0, float(self.cfg.get("generate_wait_seconds", 10.0) or 10.0) + 40.0))
-                for _ in range(12):
-                    card_box = self._find_card_box_for_tag(page, tag)
+        deadline = time.time() + max(12.0, self._download_timeout_sec(quality))
+        while time.time() < deadline:
+            tile_count = self._count_visible_media_tiles(page)
+            result_state, result_reason = self._probe_download_search_result_state(page, tag)
+            if result_state == "empty":
+                raise RuntimeError(f"검색 결과에 {tag} 항목이 없습니다.")
+            if result_state == "failure":
+                raise RuntimeError(f"{tag} 검색 결과가 실패 상태입니다. ({result_reason or '실패'})")
+            card_loc, _, card_meta = self._resolve_download_card_for_tag(page, tag, timeout_sec=1.0)
+            if card_loc is not None:
+                matched, _ = self._download_card_matches_tag(card_loc, tag)
+                page_has_tag = self._download_page_contains_tag(page, tag)
+                if matched or page_has_tag:
+                    try:
+                        card_box = card_loc.bounding_box()
+                    except Exception:
+                        card_box = None
                     if card_box:
+                        if not matched:
+                            self._emit_action(f"다운로드 카드 태그 직접일치 없음, 페이지 태그 기준 사용: {tag}")
                         break
-                    card_box = self._find_first_media_tile_box(page)
-                    if card_box:
-                        used_search_fallback = True
-                        self._emit_action(f"다운로드 검색 결과 첫 타일 사용: {tag}")
-                        break
-                    time.sleep(0.5)
+            if (not card_box) and tile_count > 0 and search_fallback_used:
+                card_box = self._find_first_media_tile_box(page)
+                if card_box:
+                    self._emit_action(f"다운로드 검색 결과 첫 타일 사용: {tag}")
+                    break
+            time.sleep(0.35)
         if not card_box:
             raise RuntimeError(f"{tag} 카드 위치를 찾지 못했습니다.")
-        if used_search_fallback:
+        if search_fallback_used:
             self._emit_log(f"ℹ️ 다운로드는 검색 결과 첫 타일 기준으로 진행합니다: {tag}")
 
         page.mouse.move(float(card_box["x"]) + float(card_box["width"]) * 0.85, float(card_box["y"]) + 20.0, steps=8)
