@@ -1686,6 +1686,136 @@ class FlowAutomationEngine:
             return 30.0
         return 24.0
 
+    def _project_url_hint(self) -> str:
+        try:
+            return str(self._current_project().get("url") or self.cfg.get("flow_site_url") or "").strip()
+        except Exception:
+            return str(self.cfg.get("flow_site_url") or "").strip()
+
+    def _close_non_project_tabs(self, page) -> None:
+        project_url = self._project_url_hint()
+        try:
+            pages = [p for p in list(page.context.pages or []) if p and (not p.is_closed())]
+        except Exception:
+            return
+        keep = None
+        for cand in pages:
+            try:
+                current_url = str(cand.url or "").strip()
+            except Exception:
+                current_url = ""
+            if project_url and project_url in current_url:
+                keep = cand
+                break
+        if keep is None:
+            keep = page
+        for cand in pages:
+            if cand is keep:
+                continue
+            try:
+                cand.close()
+            except Exception:
+                pass
+
+    def _download_source_dirs(self) -> list[Path]:
+        dirs: list[Path] = []
+        home_dir = self.base_dir.parent
+        for cand in (
+            home_dir / "Downloads",
+            home_dir / "downloads",
+            self.base_dir / "runtime" / "flow_worker_edge_profile" / "Default" / "Downloads",
+            self.base_dir / "runtime" / "flow_worker_edge_profile" / "Downloads",
+        ):
+            try:
+                if cand.exists() and cand.is_dir():
+                    dirs.append(cand)
+            except Exception:
+                continue
+        uniq: list[Path] = []
+        seen = set()
+        for item in dirs:
+            key = str(item.resolve())
+            if key not in seen:
+                uniq.append(item)
+                seen.add(key)
+        return uniq
+
+    def _scan_download_source_snapshot(self) -> dict[str, tuple[float, int]]:
+        snapshot: dict[str, tuple[float, int]] = {}
+        for folder in self._download_source_dirs():
+            try:
+                for path in folder.iterdir():
+                    if not path.is_file():
+                        continue
+                    if path.suffix.lower() in {".crdownload", ".tmp", ".part"}:
+                        continue
+                    stat = path.stat()
+                    snapshot[str(path)] = (float(stat.st_mtime), int(stat.st_size))
+            except Exception:
+                continue
+        return snapshot
+
+    def _wait_for_download_file_fallback(self, *, before_snapshot: dict[str, tuple[float, int]], started_at: float, timeout_sec: float = 18.0) -> Path | None:
+        deadline = time.time() + max(2.0, float(timeout_sec))
+        best_path = None
+        stable_hits = 0
+        last_sig = None
+        while time.time() < deadline:
+            candidates: list[tuple[float, int, Path]] = []
+            for folder in self._download_source_dirs():
+                try:
+                    for path in folder.iterdir():
+                        if not path.is_file():
+                            continue
+                        if path.suffix.lower() in {".crdownload", ".tmp", ".part"}:
+                            continue
+                        stat = path.stat()
+                        key = str(path)
+                        prev = before_snapshot.get(key)
+                        mtime = float(stat.st_mtime)
+                        size = int(stat.st_size)
+                        if mtime + 0.01 < float(started_at):
+                            continue
+                        if prev and prev == (mtime, size):
+                            continue
+                        candidates.append((mtime, size, path))
+                except Exception:
+                    continue
+            if candidates:
+                candidates.sort(key=lambda row: (row[0], row[1]), reverse=True)
+                best_path = candidates[0][2]
+                sig = (str(best_path), candidates[0][1])
+                if sig == last_sig:
+                    stable_hits += 1
+                else:
+                    stable_hits = 0
+                    last_sig = sig
+                if stable_hits >= 2:
+                    return best_path
+            time.sleep(0.5)
+        return best_path
+
+    def _adopt_downloaded_file(self, source_path: Path, tag: str) -> str:
+        output_dir = self._resolve_download_dir()
+        ext = source_path.suffix.strip() or ".png"
+        target = output_dir / f"{tag}{ext}"
+        if target.exists():
+            stem = target.stem
+            index = 2
+            while True:
+                cand = output_dir / f"{stem}_{index}{ext}"
+                if not cand.exists():
+                    target = cand
+                    break
+                index += 1
+        try:
+            source_path.replace(target)
+        except Exception:
+            import shutil
+
+            shutil.copy2(source_path, target)
+        return target.name
+
     def _save_download_file(self, download, tag: str) -> str:
         output_dir = self._resolve_download_dir()
         suggested = ""
@@ -1709,6 +1839,7 @@ class FlowAutomationEngine:
         return target.name
 
     def _download_image_for_tag(self, page, tag: str, quality: str, *, log: LogFn) -> str:
+        before_snapshot = self._scan_download_source_snapshot()
         card_box = None
         for _ in range(12):
             card_box = self._find_card_box_for_tag(page, tag)
@@ -1761,11 +1892,26 @@ class FlowAutomationEngine:
                 self._click_locator(page, quality_loc)
             else:
                 self._emit_action(f"다운로드 품질 미탐지: {tag} | {quality}")
-
-        download = self._wait_for_download_event(page, _click_download_path, timeout_sec=self._download_timeout_sec(quality))
-        saved_name = self._save_download_file(download, tag)
-        log(f"다운로드 완료: {tag} -> {saved_name}")
-        return saved_name
+        started_at = time.time()
+        try:
+            download = self._wait_for_download_event(page, _click_download_path, timeout_sec=self._download_timeout_sec(quality))
+            saved_name = self._save_download_file(download, tag)
+            log(f"다운로드 완료: {tag} -> {saved_name}")
+            return saved_name
+        except Exception as exc:
+            self._emit_action(f"다운로드 이벤트 미감지, 파일 폴백 확인: {tag}")
+            fallback_file = self._wait_for_download_file_fallback(
+                before_snapshot=before_snapshot,
+                started_at=started_at,
+                timeout_sec=max(8.0, self._download_timeout_sec(quality)),
+            )
+            if fallback_file is not None:
+                saved_name = self._adopt_downloaded_file(fallback_file, tag)
+                log(f"다운로드 폴백 완료: {tag} -> {saved_name}")
+                return saved_name
+            raise exc
+        finally:
+            self._close_non_project_tabs(page)
 
     def _submit_candidates(self) -> list[str]:
         cands = []
