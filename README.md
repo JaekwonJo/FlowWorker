@@ -1,29 +1,37 @@
 # Flow Worker
 
-Flow Worker is a standalone desktop app for Flow image/video automation.
+`Flow Worker`는 새 독립 프로그램입니다.
 
-Current status:
+이 프로젝트의 기준은 아주 단순합니다.
 
-- standalone repo and standalone runtime structure
-- Grok Worker style UI
-- local config, prompt file, project profile management
-- independent Edge launcher/attach manager
-- prompt plan builder for image/video modes
-- one-time legacy data import from `Flow Classic Plus` prompt/config files
+- `Flow Classic Plus`의 `이미지 워커`
+- `Flow Classic Plus`의 `S자동화 워커`
 
-This repo intentionally does not import or execute `Flow Classic Plus` code.
+오직 이 두 개만 참고해서, 두 워커를 가볍게 합친 새 앱을 만드는 것이 목적입니다.
 
-## Run
+## 현재 상태
+
+- 독립 저장소와 독립 실행 구조는 남겨둔 상태입니다.
+- 넓게 베껴왔던 중간 이식 코드는 되돌리는 방향으로 정리 중입니다.
+- 이제부터는 `이미지 워커 / S자동화 워커`만 기준으로 다시 합칩니다.
+
+## 실행
 
 Windows:
 
 - `FlowWorker_실행.vbs`
-- or `python -m flow_worker.main`
+- 또는 `python -m flow_worker.main`
 
-## Layout
+## 현재 폴더 구성
 
 - `flow_worker/config.py`
 - `flow_worker/prompt_parser.py`
 - `flow_worker/browser.py`
 - `flow_worker/automation.py`
 - `flow_worker/ui.py`
+
+## 개발 원칙
+
+- `Flow Classic Plus 전체`를 기준으로 삼지 않습니다.
+- 메인 통합 앱, 이어달리기, 기타 안 쓰는 기능은 참고 대상이 아닙니다.
+- 새 기능을 넣을 때는 먼저 `이미지 워커`와 `S자동화 워커` 안에서 실제 동작을 확인한 뒤 옮깁니다.

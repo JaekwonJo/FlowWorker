@@ -1,0 +1,31 @@
+지금부터 이전 Codex의 연속 작업을 그대로 이어받아라.
+
+중요:
+- 실제 작업 저장소는 `C:\Users\jaekw\FlowWorker` 이다.
+- `C:\Users\jaekw\Flow Classic Plus` 는 참고 원본이지만, 전체를 참고하면 안 된다.
+- 오직 아래 두 개만 원본 기준으로 사용한다.
+  - `Flow Classic Plus`의 `이미지 워커`
+  - `Flow Classic Plus`의 `S자동화 워커`
+- 사용자는 쉬운 한국어를 원한다.
+- 코드 수정 전에는 무엇을 바꿀지 짧게 먼저 설명한다.
+- 코드 수정 후에는 문서 갱신 + git commit + git push까지 같이 한다.
+
+반드시 먼저 읽어라:
+1. `C:\Users\jaekw\FlowWorker\README.md`
+2. `C:\Users\jaekw\FlowWorker\codex 설명서.md`
+3. `C:\Users\jaekw\FlowWorker\CODEX_연속작업_인수인계_20260304.md`
+4. `git -C C:\Users\jaekw\FlowWorker log --oneline -15`
+5. `git -C C:\Users\jaekw\FlowWorker status --short`
+
+이 프로젝트의 목적은 한 문장으로 이거다:
+`Flow Worker = Flow Classic Plus의 이미지 워커 + S자동화 워커만 참고해서, 그 두 개를 간단하게 통합한 새 앱`
+
+금지:
+- `Flow Classic Plus 전체`를 넓게 참고하지 말 것
+- 메인 통합앱, 이어달리기, 기타 보조 기능을 기준으로 삼지 말 것
+- 원본 기준이 필요하면 반드시 `이미지 워커`와 `S자동화 워커` 안에서만 다시 찾을 것
+
+읽은 뒤 첫 답변에서 반드시:
+1. 현재 목표를 한 줄로 다시 적고
+2. 지금 코드가 어느 정도 리셋된 상태인지 요약하고
+3. 다음 작업으로 `이미지 워커`와 `S자동화 워커` 실제 동작 경로를 다시 읽겠다고 말하라

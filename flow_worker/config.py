@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -38,8 +37,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "end_number": 10,
     "manual_numbers": "",
     "download_output_dir": "",
-    "browser_profile_dir": f"{RUNTIME_DIR}/edge_profile_1",
-    "browser_attach_url": "http://127.0.0.1:9222",
+    "browser_profile_dir": f"{RUNTIME_DIR}/flow_worker_edge_profile",
+    "browser_attach_url": "http://127.0.0.1:9333",
     "edge_window_inner_width": 968,
     "edge_window_inner_height": 940,
     "edge_window_left": 0,
@@ -79,11 +78,6 @@ def ensure_app_dirs(base_dir: Path) -> None:
 def config_path(base_dir: Path, config_name: str = CONFIG_FILE) -> Path:
     return base_dir / (str(config_name or CONFIG_FILE).strip() or CONFIG_FILE)
 
-
-def _legacy_flow_root(base_dir: Path) -> Path:
-    return base_dir.parent / "Flow Classic Plus" / "flow"
-
-
 def _read_json(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -92,56 +86,6 @@ def _read_json(path: Path) -> dict[str, Any]:
     except Exception:
         return {}
     return raw if isinstance(raw, dict) else {}
-
-
-def _copy_legacy_prompt_files(base_dir: Path, legacy_root: Path, prompt_slots: list[dict[str, Any]]) -> list[dict[str, str]]:
-    copied: list[dict[str, str]] = []
-    for idx, slot in enumerate(prompt_slots or [], start=1):
-        name = str((slot or {}).get("name") or f"프롬프트 파일 {idx}").strip() or f"프롬프트 파일 {idx}"
-        file_name = str((slot or {}).get("file") or "").strip()
-        if not file_name:
-            continue
-        source = legacy_root / file_name
-        rel = f"{PROMPTS_DIR}/flow_prompts_slot_{idx}.txt"
-        target = base_dir / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if source.exists():
-            try:
-                shutil.copyfile(source, target)
-            except Exception:
-                target.write_text(source.read_text(encoding="utf-8", errors="ignore"), encoding="utf-8")
-        else:
-            target.write_text("", encoding="utf-8")
-        copied.append({"name": name, "file": rel})
-    return copied
-
-
-def bootstrap_from_legacy_flow(base_dir: Path) -> dict[str, Any] | None:
-    legacy_root = _legacy_flow_root(base_dir)
-    legacy_cfg_path = legacy_root / "flow_config.json"
-    if not legacy_cfg_path.exists():
-        return None
-    legacy_cfg = _read_json(legacy_cfg_path)
-    if not legacy_cfg:
-        return None
-    cfg = deepcopy(DEFAULT_CONFIG)
-    profiles = list(legacy_cfg.get("project_profiles") or [])
-    mapped_profiles = []
-    for item in profiles:
-        mapped_profiles.append(
-            {
-                "name": str((item or {}).get("project_name") or (item or {}).get("name") or "프로젝트").strip() or "프로젝트",
-                "url": str((item or {}).get("url") or cfg["flow_site_url"]).strip() or cfg["flow_site_url"],
-            }
-        )
-    if mapped_profiles:
-        cfg["project_profiles"] = mapped_profiles
-        cfg["project_index"] = max(0, min(int(legacy_cfg.get("active_project_profile", 0) or 0), len(mapped_profiles) - 1))
-    copied_slots = _copy_legacy_prompt_files(base_dir, legacy_root, list(legacy_cfg.get("prompt_slots") or []))
-    if copied_slots:
-        cfg["prompt_slots"] = copied_slots
-        cfg["prompt_slot_index"] = max(0, min(int(legacy_cfg.get("active_prompt_slot", 0) or 0), len(copied_slots) - 1))
-    return cfg
 
 
 def _ensure_prompt_slots(base_dir: Path, cfg: dict[str, Any]) -> dict[str, Any]:
@@ -173,7 +117,7 @@ def load_config(base_dir: Path, config_name: str = CONFIG_FILE) -> dict[str, Any
     ensure_app_dirs(base_dir)
     path = config_path(base_dir, config_name)
     if not path.exists():
-        cfg = bootstrap_from_legacy_flow(base_dir) or deepcopy(DEFAULT_CONFIG)
+        cfg = deepcopy(DEFAULT_CONFIG)
         cfg = _ensure_prompt_slots(base_dir, cfg)
         save_config(base_dir, cfg, config_name)
         return cfg
