@@ -1420,6 +1420,135 @@ class FlowAutomationEngine:
                 seen.add(item)
         return uniq
 
+    def _download_search_input_candidates(self) -> list[str]:
+        cands = [
+            "input[placeholder*='검색' i]",
+            "input[placeholder*='search' i]",
+            "input[aria-label*='검색' i]",
+            "input[aria-label*='search' i]",
+            "input[type='search']",
+            "input.quick-search-input",
+            "input",
+        ]
+        seen = set()
+        uniq = []
+        for item in cands:
+            if item not in seen:
+                uniq.append(item)
+                seen.add(item)
+        return uniq
+
+    def _resolve_download_search_input(self, page, timeout_sec: float = 1.8):
+        end_ts = time.time() + max(0.8, float(timeout_sec))
+        while time.time() < end_ts:
+            best = None
+            best_sel = ""
+            best_score = float("-inf")
+            for sel in self._download_search_input_candidates():
+                try:
+                    loc = page.locator(sel)
+                    total = min(loc.count(), 40)
+                except Exception:
+                    continue
+                for idx in range(total):
+                    cand = loc.nth(idx)
+                    try:
+                        if not cand.is_visible(timeout=250):
+                            continue
+                        box = cand.bounding_box()
+                    except Exception:
+                        continue
+                    if not box:
+                        continue
+                    width = float(box.get("width") or 0.0)
+                    height = float(box.get("height") or 0.0)
+                    x = float(box.get("x") or 0.0)
+                    y = float(box.get("y") or 0.0)
+                    if width < 120.0 or height < 18.0:
+                        continue
+                    meta = self._locator_meta_text(cand)
+                    score = 0.0
+                    if any(key in meta for key in ("검색", "search")):
+                        score += 900.0
+                    if any(key in meta for key in ("asset", "에셋", "애셋")):
+                        score -= 700.0
+                    if any(key in meta for key in ("prompt", "프롬프트", "message", "무엇을 만들")):
+                        score -= 1000.0
+                    if 180.0 <= width <= 620.0:
+                        score += 150.0
+                    score -= y * 1.8
+                    score -= abs(x - 320.0) * 0.08
+                    if score > best_score:
+                        best = cand
+                        best_sel = sel
+                        best_score = score
+            if best is not None and best_score > -200.0:
+                return best, best_sel
+            time.sleep(0.10)
+        return None, None
+
+    def _set_download_search_tag(self, page, tag: str):
+        search_input, search_sel = self._resolve_download_search_input(page, timeout_sec=1.8)
+        if search_input is None:
+            self._emit_action(f"다운로드 검색창 미탐지: {tag}")
+            return False
+        try:
+            search_input.click(timeout=600)
+        except Exception:
+            try:
+                search_input.focus(timeout=500)
+            except Exception:
+                self._emit_action(f"다운로드 검색창 포커스 실패: {tag}")
+                return False
+        try:
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Backspace")
+        except Exception:
+            pass
+        try:
+            search_input.fill(tag, timeout=700)
+        except Exception:
+            try:
+                search_input.type(tag, delay=random.randint(25, 65), timeout=1400)
+            except Exception:
+                self._emit_action(f"다운로드 검색 입력 실패: {tag}")
+                return False
+        try:
+            page.keyboard.press("Enter")
+        except Exception:
+            pass
+        self._emit_log(f"🔎 다운로드 검색 입력: {tag} ({search_sel or '자동 탐색'})")
+        self._emit_action(f"다운로드 검색 입력: {tag} ({search_sel or '자동 탐색'})")
+        time.sleep(0.35)
+        return True
+
+    def _find_first_media_tile_box(self, page):
+        try:
+            return page.evaluate(
+                """() => {
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const r = el.getBoundingClientRect();
+                        if (!r || r.width < 160 || r.height < 90) return false;
+                        const st = window.getComputedStyle(el);
+                        if (!st) return false;
+                        return st.display !== 'none' && st.visibility !== 'hidden' && st.opacity !== '0';
+                    };
+                    const candidates = Array.from(document.querySelectorAll("video, img, canvas"));
+                    const boxes = [];
+                    for (const el of candidates) {
+                        if (!isVisible(el)) continue;
+                        const r = el.getBoundingClientRect();
+                        if (r.top < 70) continue;
+                        boxes.push({x:r.left, y:r.top, width:r.width, height:r.height});
+                    }
+                    boxes.sort((a,b) => (a.y - b.y) || (a.x - b.x));
+                    return boxes.length ? boxes[0] : null;
+                }"""
+            )
+        except Exception:
+            return None
+
     def _find_card_box_for_tag(self, page, tag: str):
         try:
             return page.evaluate(
@@ -1571,8 +1700,25 @@ class FlowAutomationEngine:
             if card_box:
                 break
             time.sleep(0.5)
+        used_search_fallback = False
+        if not card_box:
+            self._emit_log(f"🔎 카드 직접 탐지 실패, 다운로드 검색으로 전환: {tag}")
+            self._emit_action(f"카드 직접 탐지 실패 -> 다운로드 검색 전환: {tag}")
+            if self._set_download_search_tag(page, tag):
+                for _ in range(12):
+                    card_box = self._find_card_box_for_tag(page, tag)
+                    if card_box:
+                        break
+                    card_box = self._find_first_media_tile_box(page)
+                    if card_box:
+                        used_search_fallback = True
+                        self._emit_action(f"다운로드 검색 결과 첫 타일 사용: {tag}")
+                        break
+                    time.sleep(0.5)
         if not card_box:
             raise RuntimeError(f"{tag} 카드 위치를 찾지 못했습니다.")
+        if used_search_fallback:
+            self._emit_log(f"ℹ️ 다운로드는 검색 결과 첫 타일 기준으로 진행합니다: {tag}")
 
         page.mouse.move(float(card_box["x"]) + float(card_box["width"]) * 0.85, float(card_box["y"]) + 20.0, steps=8)
         time.sleep(0.25)
