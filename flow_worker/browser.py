@@ -63,7 +63,6 @@ class BrowserManager:
         self.page = self._pick_page(self.context, url)
         if self.page is None:
             self.page = self.context.new_page()
-        self._close_duplicate_tabs(self.context, keep_page=self.page, target_url=url)
         if url and url not in str(self.page.url or ""):
             self.page.goto(url, wait_until="domcontentloaded")
         self._activate_page_window(self.page)
@@ -101,10 +100,10 @@ class BrowserManager:
             "--no-first-run",
             "--no-default-browser-check",
             "--new-window",
-            "about:blank",
+            url or "about:blank",
         ]
         self.edge_process = subprocess.Popen(cmd, cwd=str(profile_path.parent))
-        self.log(f"MS Edge 실행: {url or 'about:blank'}")
+        self.log(f"MS Edge 실행: {url}")
         deadline = time.time() + 15.0
         while time.time() < deadline:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -132,31 +131,6 @@ class BrowserManager:
                 session.send("Browser.setWindowBounds", {"windowId": window_id, "bounds": {"windowState": "normal"}})
         except Exception:
             pass
-
-    def _close_duplicate_tabs(self, context, *, keep_page, target_url: str = "") -> None:
-        pages = [page for page in list(context.pages or []) if page and (not page.is_closed())]
-        target_url = str(target_url or "").strip()
-        kept_target = False
-        for page in pages:
-            if page == keep_page:
-                if target_url:
-                    try:
-                        kept_target = target_url in str(page.url or "")
-                    except Exception:
-                        pass
-                continue
-            try:
-                current_url = str(page.url or "")
-            except Exception:
-                current_url = ""
-            if target_url and target_url in current_url:
-                if kept_target:
-                    try:
-                        page.close()
-                    except Exception:
-                        pass
-                else:
-                    kept_target = True
 
     @staticmethod
     def _port_from_attach_url(raw: str) -> int:
