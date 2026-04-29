@@ -1523,6 +1523,89 @@ class FlowAutomationEngine:
         time.sleep(0.35)
         return True
 
+    def _clear_download_search_tag(self, page) -> None:
+        search_input, _ = self._resolve_download_search_input(page, timeout_sec=1.0)
+        if search_input is None:
+            return
+        try:
+            search_input.click(timeout=500)
+        except Exception:
+            try:
+                search_input.focus(timeout=500)
+            except Exception:
+                return
+        try:
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Backspace")
+        except Exception:
+            try:
+                search_input.fill("", timeout=500)
+            except Exception:
+                return
+        self._emit_action("다운로드 검색어 초기화")
+        time.sleep(0.12)
+
+    def _detect_download_result_progress(self, page):
+        try:
+            return page.evaluate(
+                """() => {
+                    const isVisible = (el) => {
+                        if (!el) return false;
+                        const r = el.getBoundingClientRect();
+                        if (!r || r.width < 12 || r.height < 12) return false;
+                        const st = window.getComputedStyle(el);
+                        return st && st.display !== 'none' && st.visibility !== 'hidden' && st.opacity !== '0';
+                    };
+                    const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+                    const nodes = document.querySelectorAll('div, span, p, button');
+                    let percent = '';
+                    let reason = '';
+                    for (const node of nodes) {
+                        if (!isVisible(node)) continue;
+                        const rect = node.getBoundingClientRect();
+                        if (rect.top < 60 || rect.top > window.innerHeight * 0.82) continue;
+                        if (rect.left < 0 || rect.left > window.innerWidth * 0.96) continue;
+                        const text = clean(node.innerText || node.textContent || '');
+                        if (!text || text.length > 80) continue;
+                        const m = text.match(/\\b([1-9][0-9]?|100)%\\b/);
+                        if (m) {
+                            percent = m[0];
+                            reason = text;
+                            break;
+                        }
+                        const lower = text.toLowerCase();
+                        if (lower.includes('생성 중') || lower.includes('processing') || lower.includes('generating')) {
+                            reason = text;
+                            break;
+                        }
+                    }
+                    return {percent, reason};
+                }"""
+            ) or {}
+        except Exception:
+            return {"percent": "", "reason": ""}
+
+    def _wait_until_download_result_ready(self, page, tag: str, *, timeout_sec: float = 90.0) -> None:
+        deadline = time.time() + max(3.0, float(timeout_sec))
+        seen_progress = ""
+        while time.time() < deadline:
+            progress = self._detect_download_result_progress(page) or {}
+            percent = str(progress.get("percent") or "").strip()
+            reason = str(progress.get("reason") or "").strip()
+            if percent or reason:
+                marker = percent or reason
+                if marker != seen_progress:
+                    seen_progress = marker
+                    self._emit_log(f"⏳ 검색 결과 생성 진행 감지: {marker}")
+                    self._emit_action(f"다운로드 대상 생성 진행 감지: {marker}")
+                time.sleep(1.0)
+                continue
+            result_state, _ = self._probe_download_search_result_state(tag)
+            if result_state in ("found", "pending"):
+                self._emit_action(f"다운로드 대상 준비 완료 추정: {tag}")
+                return
+            time.sleep(0.6)
+
     def _find_first_media_tile_box(self, page):
         try:
             return page.evaluate(
@@ -1841,6 +1924,7 @@ class FlowAutomationEngine:
     def _download_image_for_tag(self, page, tag: str, quality: str, *, log: LogFn) -> str:
         before_snapshot = self._scan_download_source_snapshot()
         card_box = None
+        search_fallback_used = False
         for _ in range(12):
             card_box = self._find_card_box_for_tag(page, tag)
             if card_box:
@@ -1851,6 +1935,8 @@ class FlowAutomationEngine:
             self._emit_log(f"🔎 카드 직접 탐지 실패, 다운로드 검색으로 전환: {tag}")
             self._emit_action(f"카드 직접 탐지 실패 -> 다운로드 검색 전환: {tag}")
             if self._set_download_search_tag(page, tag):
+                search_fallback_used = True
+                self._wait_until_download_result_ready(page, tag, timeout_sec=max(30.0, float(self.cfg.get("generate_wait_seconds", 10.0) or 10.0) + 40.0))
                 for _ in range(12):
                     card_box = self._find_card_box_for_tag(page, tag)
                     if card_box:
@@ -1911,6 +1997,8 @@ class FlowAutomationEngine:
                 return saved_name
             raise exc
         finally:
+            if search_fallback_used:
+                self._clear_download_search_tag(page)
             self._close_non_project_tabs(page)
 
     def _submit_candidates(self) -> list[str]:
