@@ -4,13 +4,12 @@ import os
 import subprocess
 import threading
 import tkinter as tk
-from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog
 
 from .automation import FlowAutomationEngine
 from .browser import BrowserManager
-from .config import CONFIG_FILE, LOGS_DIR, load_config, next_prompt_slot_file, save_config
+from .config import CONFIG_FILE, load_config, next_prompt_slot_file, save_config
 from .prompt_parser import compress_numbers, summarize_prompt_file
 from .queue_state import QueueItem
 
@@ -34,9 +33,6 @@ class FlowWorkerApp:
         self.run_thread: threading.Thread | None = None
         self.stop_requested = False
         self.paused = False
-        self.action_log_path: Path | None = None
-        self.action_log_fp = None
-        self.action_log_lock = threading.Lock()
         self.settings_collapsed = bool(self.cfg.get("settings_collapsed", False))
         self.log_panel_visible = bool(self.cfg.get("log_panel_visible", False))
         self._resize_drag_origin: tuple[int, int, int, int] | None = None
@@ -763,15 +759,11 @@ class FlowWorkerApp:
                     should_stop=lambda: self.stop_requested,
                     is_paused=lambda: self.paused,
                     browser=self.browser,
-                    action_log=self.action_log,
                 )
             except Exception as exc:
                 self._threadsafe_status("실행 실패")
                 self.log(f"실행 실패: {exc}")
-            finally:
-                self._threadsafe_action_log_close()
 
-        self._open_action_log("action_trace")
         self.run_thread = threading.Thread(target=_run, daemon=True)
         self.run_thread.start()
 
@@ -839,14 +831,7 @@ class FlowWorkerApp:
         if not self.queue_items:
             tk.Label(self.queue_inner, text="아직 대기열이 없습니다.\n작업봇 창 열기나 시작을 누르면 여기에 상태가 쌓입니다.", bg=self._bg("queue_panel_bg"), fg=self._bg("sub_fg"), justify="left").pack(anchor="w", padx=10, pady=10)
         else:
-            canvas_width = max(320, int(self.queue_canvas.winfo_width() or self.queue_wrap.winfo_width() or 320))
-            columns = 3 if canvas_width >= 900 else 2 if canvas_width >= 580 else 1
-            card_gap = 10
-            card_width = max(220, int((canvas_width - (card_gap * (columns - 1))) / columns) - 6)
-            wrap_len = max(170, card_width - 24)
-            for col in range(columns):
-                self.queue_inner.grid_columnconfigure(col, weight=1, uniform="queuecols")
-            for index, item in enumerate(self.queue_items):
+            for item in self.queue_items:
                 status = str(item.status or "pending").strip().lower()
                 if status in ("running", "waiting", "downloading"):
                     active += 1
@@ -865,13 +850,10 @@ class FlowWorkerApp:
                     "failed": "#7E3842",
                 }.get(status, "#433124")
                 card = tk.Frame(self.queue_inner, bg=color, highlightbackground=self._bg("queue_panel_border"), highlightthickness=1)
-                row = index // columns
-                col = index % columns
-                padx = (0, card_gap) if col < (columns - 1) else (0, 0)
-                card.grid(row=row, column=col, sticky="nsew", padx=padx, pady=(0, 8))
+                card.pack(fill="x", pady=(0, 8))
                 tk.Label(card, text=item.tag, bg=color, fg="#FFFFFF", font=("Malgun Gothic", 10, "bold")).pack(anchor="w", padx=10, pady=(8, 2))
                 detail = item.message or item.prompt
-                tk.Label(card, text=detail[:180], bg=color, fg="#E8F1FF", justify="left", wraplength=wrap_len).pack(anchor="w", padx=10, pady=(0, 8))
+                tk.Label(card, text=detail[:160], bg=color, fg="#E8F1FF", justify="left", wraplength=620).pack(anchor="w", padx=10, pady=(0, 8))
         self.queue_summary_var.set(f"활성 {active}개 | 완료 {success} | 실패 {failed} | 대기 {pending}")
         self._refresh_progress_from_queue()
         self._update_queue_scroll()
@@ -888,7 +870,6 @@ class FlowWorkerApp:
 
     def _on_queue_canvas_resize(self, event) -> None:
         self.queue_canvas.itemconfigure(self.queue_window, width=event.width)
-        self.root.after_idle(self._render_queue)
 
     def _on_mousewheel(self, event) -> None:
         try:
@@ -903,50 +884,6 @@ class FlowWorkerApp:
         self.log_lines.append(message)
         self.log_lines = self.log_lines[-200:]
         self._render_log()
-
-    def _open_action_log(self, prefix: str = "action_trace") -> None:
-        self._close_action_log(silent=True)
-        logs_dir = self.base_dir / LOGS_DIR
-        logs_dir.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_prefix = str(prefix or "action_trace").strip() or "action_trace"
-        self.action_log_path = logs_dir / f"{safe_prefix}_{stamp}.log"
-        self.action_log_fp = self.action_log_path.open("a", encoding="utf-8")
-        self.action_log(f"액션 로그 파일 생성: {self.action_log_path}")
-        self.log(f"🧾 액션 트레이스 저장 시작: {self.action_log_path.name}")
-
-    def _close_action_log(self, silent: bool = False) -> None:
-        with self.action_log_lock:
-            if not self.action_log_fp:
-                return
-            try:
-                stamp = datetime.now().strftime("%H:%M:%S")
-                self.action_log_fp.write(f"[{stamp}] 액션 로그 종료\n")
-                self.action_log_fp.flush()
-                self.action_log_fp.close()
-            except Exception:
-                pass
-            finally:
-                old_path = self.action_log_path
-                self.action_log_fp = None
-                self.action_log_path = None
-        if (not silent) and old_path:
-            self.log(f"🧾 액션 트레이스 저장 종료: {old_path.name}")
-
-    def _threadsafe_action_log_close(self) -> None:
-        self.root.after(0, self._close_action_log)
-
-    def action_log(self, message: str) -> None:
-        stamp = datetime.now().strftime("%H:%M:%S")
-        line = f"[{stamp}] {str(message)}"
-        with self.action_log_lock:
-            if not self.action_log_fp:
-                return
-            try:
-                self.action_log_fp.write(line + "\n")
-                self.action_log_fp.flush()
-            except Exception:
-                pass
 
     def _refresh_progress_from_queue(self) -> None:
         total = len(self.queue_items)
@@ -979,7 +916,6 @@ class FlowWorkerApp:
 
     def on_close(self) -> None:
         self.manual_save()
-        self._close_action_log(silent=True)
         self.browser.stop(close_window=False)
         self.root.destroy()
 
