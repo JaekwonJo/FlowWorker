@@ -66,6 +66,7 @@ class BrowserManager:
         self._close_duplicate_tabs(self.context, keep_page=self.page, target_url=url)
         if url and url not in str(self.page.url or ""):
             self.page.goto(url, wait_until="domcontentloaded")
+        self._close_duplicate_tabs(self.context, keep_page=self.page, target_url=url)
         self._activate_page_window(self.page)
         apply_edge_window_bounds(self.page, window_cfg or {}, log=self.log, reason="작업봇 창 열기")
         self.log("브라우저 준비 완료")

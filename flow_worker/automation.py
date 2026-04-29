@@ -1513,12 +1513,13 @@ class FlowAutomationEngine:
             except Exception:
                 self._emit_action(f"다운로드 검색 입력 실패: {tag}")
                 return False
-        try:
-            page.keyboard.press("Enter")
-        except Exception:
-            pass
         self._emit_log(f"🔎 다운로드 검색 입력: {tag} ({search_sel or '자동 탐색'})")
         self._emit_action(f"다운로드 검색 입력: {tag} ({search_sel or '자동 탐색'})")
+        time.sleep(0.12)
+        typed = self._normalize_reference_asset_tag(self._read_input_text(search_input))
+        if typed != self._normalize_reference_asset_tag(tag):
+            self._emit_action(f"다운로드 검색 입력 불일치: typed={typed or '-'} wanted={tag}")
+            return False
         time.sleep(0.35)
         return True
 
@@ -1644,22 +1645,36 @@ class FlowAutomationEngine:
 
     def _wait_for_download_event(self, page, click_fn, *, timeout_sec: float = 30.0):
         downloads = []
+        context_downloads = []
 
         def _on_download(download):
             downloads.append(download)
 
+        def _on_context_download(download):
+            context_downloads.append(download)
+
         page.on("download", _on_download)
+        try:
+            page.context.on("download", _on_context_download)
+        except Exception:
+            pass
         try:
             click_fn()
             deadline = time.time() + max(1.0, float(timeout_sec))
             while time.time() < deadline:
                 if downloads:
                     return downloads[0]
+                if context_downloads:
+                    return context_downloads[0]
                 time.sleep(0.2)
             raise RuntimeError("다운로드 이벤트를 시작하지 못했습니다.")
         finally:
             try:
                 page.remove_listener("download", _on_download)
+            except Exception:
+                pass
+            try:
+                page.context.remove_listener("download", _on_context_download)
             except Exception:
                 pass
 
@@ -1728,18 +1743,24 @@ class FlowAutomationEngine:
         if more_loc is None:
             raise RuntimeError("다운로드 더보기 버튼을 찾지 못했습니다.")
 
+        self._emit_action(f"다운로드 더보기 클릭 시도: {tag}")
         self._click_locator(page, more_loc)
         time.sleep(0.35)
         download_loc, _ = self._resolve_best_locator(page, self._download_menu_candidates(), timeout_ms=1400, prefer_enabled=False)
         if download_loc is None:
             raise RuntimeError("다운로드 메뉴를 찾지 못했습니다.")
+        self._emit_action(f"다운로드 메뉴 감지: {tag}")
 
         def _click_download_path():
+            self._emit_action(f"다운로드 메뉴 클릭: {tag}")
             self._click_locator(page, download_loc)
             time.sleep(0.35)
             quality_loc, _ = self._resolve_best_locator(page, self._download_quality_candidates(quality), timeout_ms=1400, prefer_enabled=False)
             if quality_loc is not None:
+                self._emit_action(f"다운로드 품질 클릭: {tag} | {quality}")
                 self._click_locator(page, quality_loc)
+            else:
+                self._emit_action(f"다운로드 품질 미탐지: {tag} | {quality}")
 
         download = self._wait_for_download_event(page, _click_download_path, timeout_sec=self._download_timeout_sec(quality))
         saved_name = self._save_download_file(download, tag)
