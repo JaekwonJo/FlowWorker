@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import os
+import json
 import subprocess
 import threading
 import tkinter as tk
@@ -11,6 +12,7 @@ from tkinter import filedialog, messagebox, simpledialog
 from .automation import FlowAutomationEngine
 from .browser import BrowserManager
 from .config import CONFIG_FILE, load_config, next_prompt_slot_file, save_config
+from .launcher import launch_next_worker
 from .legacy_worker_bridge import LegacyWorkerBridge
 from .prompt_parser import compress_numbers, summarize_prompt_file
 from .queue_state import QueueItem
@@ -26,9 +28,11 @@ def _open_path(path: Path) -> None:
 
 
 class FlowWorkerApp:
-    def __init__(self) -> None:
+    def __init__(self, *, config_name: str | None = None, slot_file: str | None = None) -> None:
         self.base_dir = Path(__file__).resolve().parent.parent
-        self.cfg = load_config(self.base_dir, config_name=CONFIG_FILE)
+        self.config_name = str(config_name or CONFIG_FILE).strip() or CONFIG_FILE
+        self.slot_file = Path(slot_file).resolve() if slot_file else None
+        self.cfg = load_config(self.base_dir, config_name=self.config_name)
         self.browser = BrowserManager(self.log)
         self.backend = LegacyWorkerBridge(self.base_dir, self.log)
         self.queue_items: list[QueueItem] = []
@@ -60,6 +64,7 @@ class FlowWorkerApp:
         self._apply_media_visibility()
         self._suspend_auto_save = False
         self.refresh_all()
+        self._write_slot_file()
         self.root.after(400, self._poll_backend_state)
 
     def _build_vars(self) -> None:
@@ -84,6 +89,7 @@ class FlowWorkerApp:
         self.queue_summary_var = tk.StringVar(value="활성 0개 | 완료 0 | 실패 0 | 대기 0")
         self.prompt_file_summary_var = tk.StringVar(value="")
         self.attach_url_var = tk.StringVar(value="")
+        self.browser_profile_var = tk.StringVar(value="")
 
     def _bg(self, key: str) -> str:
         theme = {
@@ -152,6 +158,7 @@ class FlowWorkerApp:
         self._action_button(action_left, "재개", self.resume_run, self._bg("small_btn_bg"), small=True).pack(side="left", padx=6)
         self.settings_toggle_btn = self._action_button(action_left, "⚙ 설정 접기", self.toggle_settings_panel, self._bg("settings_toggle_bg"), small=True)
         self.settings_toggle_btn.pack(side="left", padx=6)
+        self._action_button(action_right, "새 워커", self.open_additional_worker, self._bg("small_btn_bg"), small=True).pack(side="left", padx=(0, 6))
         self._action_button(action_right, "작업봇 창 열기", self.open_browser_window, self._bg("open_btn_bg")).pack(side="left", padx=(0, 6))
         self.start_btn = self._action_button(action_right, "▶ 시작", self.start_run, self._bg("start_btn_bg"))
         self.start_btn.pack(side="left")
@@ -249,6 +256,10 @@ class FlowWorkerApp:
         attach_note.pack(fill="x", padx=4, pady=(0, 8))
         tk.Label(attach_note, text="브라우저 연결", bg=self._bg("settings_bg"), fg="#D8E4FF", font=("Malgun Gothic", 10)).pack(anchor="w")
         tk.Label(attach_note, textvariable=self.attach_url_var, bg=self._bg("chip_bg"), fg=self._bg("chip_fg"), font=("Consolas", 10, "bold"), padx=10, pady=5).pack(anchor="w", pady=(6, 0))
+        browser_meta = tk.Frame(attach_note, bg=self._bg("settings_bg"))
+        browser_meta.pack(fill="x", pady=(6, 0))
+        tk.Label(browser_meta, textvariable=self.browser_profile_var, bg=self._bg("settings_bg"), fg=self._bg("sub_fg"), font=("Consolas", 9)).pack(side="left")
+        self._action_button(browser_meta, "새 프로필", self.assign_new_profile, self._bg("open_btn_bg"), small=True).pack(side="right")
 
     def _build_number_settings(self, parent: tk.Frame) -> None:
         tk.Label(parent, text="번호 설정", bg=self._bg("settings_bg"), fg="#FFFFFF", font=("Malgun Gothic", 11, "bold")).pack(anchor="w", padx=4, pady=(0, 6))
@@ -374,6 +385,7 @@ class FlowWorkerApp:
         self.generate_wait_var.set(str(self.cfg.get("generate_wait_seconds", 10.0) or 10.0))
         self.next_wait_var.set(str(self.cfg.get("next_prompt_wait_seconds", 7.0) or 7.0))
         self.attach_url_var.set(f"MS Edge 연결 | {self.cfg.get('browser_attach_url', 'http://127.0.0.1:9222')}")
+        self.browser_profile_var.set(f"프로필 | {self.cfg.get('browser_profile_name', 'flowworker_profile_1')}")
 
     def _write_vars_to_config(self) -> None:
         self.cfg["worker_name"] = self.worker_name_var.get().strip() or "Flow Worker1"
@@ -404,16 +416,18 @@ class FlowWorkerApp:
         if self._suspend_auto_save:
             return
         self._write_vars_to_config()
-        save_config(self.base_dir, self.cfg, CONFIG_FILE)
+        save_config(self.base_dir, self.cfg, self.config_name)
         if reason:
             self.log(f"자동 저장: {reason}")
         self.refresh_summary_only()
+        self._write_slot_file()
 
     def manual_save(self) -> None:
         self._write_vars_to_config()
-        save_config(self.base_dir, self.cfg, CONFIG_FILE)
+        save_config(self.base_dir, self.cfg, self.config_name)
         self.log("설정 저장")
         self.refresh_summary_only()
+        self._write_slot_file()
 
     def refresh_all(self) -> None:
         self._refresh_project_menu()
@@ -512,6 +526,7 @@ class FlowWorkerApp:
         media_label = "비디오" if str(self.cfg.get("media_mode") or "image") == "video" else "이미지"
         self.project_summary_var.set(f"사이트: flow | {media_label} | {project.get('name', '기본 프로젝트')}")
         self.attach_url_var.set(f"MS Edge 연결 | {self.cfg.get('browser_attach_url', 'http://127.0.0.1:9222')}")
+        self.browser_profile_var.set(f"프로필 | {self.cfg.get('browser_profile_name', 'flowworker_profile_1')}")
         if slots:
             slot_file = str((slots[prompt_index] or {}).get("file") or "")
             slot_path = self.base_dir / slot_file
@@ -675,6 +690,26 @@ class FlowWorkerApp:
         self.root.clipboard_append(text)
         self.log(f"실패 번호 복붙: {text or '(비어 있음)'}")
 
+    def open_additional_worker(self) -> None:
+        try:
+            launch_next_worker(self.base_dir)
+            self.log("새 워커 실행 요청")
+        except Exception as exc:
+            self.log(f"새 워커 실행 실패: {exc}")
+            messagebox.showerror("새 워커 실행 실패", str(exc), parent=self.root)
+
+    def assign_new_profile(self) -> None:
+        current = self._int_or_default(str(self.cfg.get("worker_index", 1) or 1), 1)
+        next_idx = max(1, current + 1)
+        self.cfg["worker_index"] = next_idx
+        self.cfg["worker_name"] = f"Flow Worker{next_idx}"
+        self.cfg["browser_profile_name"] = f"flowworker_profile_{next_idx}"
+        self.cfg["browser_profile_dir"] = f"runtime/flow_worker_edge_profile_{next_idx}"
+        self.cfg["browser_attach_url"] = f"http://127.0.0.1:{9332 + next_idx}"
+        self.worker_name_var.set(str(self.cfg["worker_name"]))
+        self.manual_save()
+        self.log(f"새 프로필 적용: {self.cfg['browser_profile_name']} | {self.cfg['browser_attach_url']}")
+
     def open_browser_window(self) -> None:
         self.auto_save("브라우저 열기 전 저장")
         project = self._current_project()
@@ -706,7 +741,13 @@ class FlowWorkerApp:
             messagebox.showwarning("안내", "실행할 프롬프트가 없습니다.", parent=self.root)
             self.log("실행할 프롬프트가 없습니다.")
             return
-        self.queue_items = [QueueItem(number=item.number, tag=item.tag, prompt=item.rendered_prompt) for item in plan.items]
+        prepared = []
+        for item in plan.items:
+            display_tag = item.tag
+            if getattr(item, "media_mode", "") == "video" and getattr(item, "route_end_tag", ""):
+                display_tag = f"{item.route_start_tag}>{item.route_end_tag}"
+            prepared.append(QueueItem(number=item.number, tag=display_tag, prompt=item.rendered_prompt))
+        self.queue_items = prepared
         self._render_queue()
         self._refresh_progress_from_plan(plan.items)
         self.status_var.set("실행 준비 중")
@@ -820,8 +861,8 @@ class FlowWorkerApp:
                 col = idx % cols
                 card.grid(row=row, column=col, sticky="nsew", padx=(0, 10) if col < cols - 1 else (0, 0), pady=(0, 10))
                 tk.Label(card, text=self._queue_tag(item), bg=color, fg="#FFFFFF", font=("Malgun Gothic", 10, "bold")).pack(anchor="w", padx=10, pady=(8, 2))
-                detail = self._queue_message(item) or self._queue_prompt(item)
-                tk.Label(card, text=detail[:180], bg=color, fg="#E8F1FF", justify="left", wraplength=260).pack(anchor="w", padx=10, pady=(0, 8))
+                detail = self._queue_display_message(item) or self._queue_prompt(item)
+                tk.Label(card, text=detail[:180], bg=color, fg="#E8F1FF", justify="left", wraplength=210).pack(anchor="w", padx=10, pady=(0, 8))
         self.queue_summary_var.set(f"활성 {active}개 | 완료 {success} | 실패 {failed} | 대기 {pending}")
         self._update_queue_scroll()
 
@@ -950,7 +991,7 @@ class FlowWorkerApp:
                         [
                             str(item.get("token") or item.get("tag") or ""),
                             str(item.get("status") or ""),
-                            str(item.get("detail") or item.get("message") or ""),
+                            FlowWorkerApp._stabilize_queue_detail(str(item.get("detail") or item.get("message") or "")),
                             str(item.get("file_name") or ""),
                         ]
                     )
@@ -961,7 +1002,7 @@ class FlowWorkerApp:
                         [
                             str(getattr(item, "tag", "") or ""),
                             str(getattr(item, "status", "") or ""),
-                            str(getattr(item, "message", "") or ""),
+                            FlowWorkerApp._stabilize_queue_detail(str(getattr(item, "message", "") or "")),
                             str(getattr(item, "file_name", "") or ""),
                         ]
                     )
@@ -970,13 +1011,39 @@ class FlowWorkerApp:
 
     def _queue_column_count(self) -> int:
         width = max(1, int(self.queue_canvas.winfo_width() or 0))
-        if width >= 1260:
+        if width >= 760:
             return 4
-        if width >= 960:
+        if width >= 520:
             return 3
-        if width >= 680:
+        if width >= 300:
             return 2
         return 1
+
+    @staticmethod
+    def _stabilize_queue_detail(text: str) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        raw = re.sub(r"\s+\d+초\b", "", raw)
+        raw = re.sub(r"\(\+\s*랜덤\)", "", raw)
+        raw = re.sub(r"\(±랜덤\)", "", raw)
+        raw = raw.replace("생성 대기", "생성 대기 중")
+        raw = raw.replace("다운로드 대기", "다운로드 대기 중")
+        return " ".join(raw.split())
+
+    def _queue_display_message(self, item) -> str:
+        raw = self._queue_message(item)
+        status = self._queue_status(item)
+        stable = self._stabilize_queue_detail(raw)
+        if status == "waiting":
+            return stable or "생성 대기 중"
+        if status == "downloading":
+            return stable or "다운로드 중"
+        if status == "running":
+            return stable or "작업 중"
+        if status == "pending":
+            return "보류 중"
+        return stable
 
     def _start_resize_drag(self, event) -> None:
         self._resize_drag_origin = (event.x_root, event.y_root, self.root.winfo_width(), self.root.winfo_height())
@@ -992,6 +1059,28 @@ class FlowWorkerApp:
     def _end_resize_drag(self, _event=None) -> None:
         self._resize_drag_origin = None
 
+    def _write_slot_file(self) -> None:
+        if not self.slot_file:
+            return
+        payload = {
+            "pid": os.getpid(),
+            "worker_index": int(self.cfg.get("worker_index", 1) or 1),
+            "worker_name": str(self.cfg.get("worker_name") or "Flow Worker1"),
+            "config_name": self.config_name,
+            "browser_profile_name": str(self.cfg.get("browser_profile_name") or ""),
+            "browser_attach_url": str(self.cfg.get("browser_attach_url") or ""),
+        }
+        self.slot_file.parent.mkdir(parents=True, exist_ok=True)
+        self.slot_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _remove_slot_file(self) -> None:
+        if not self.slot_file:
+            return
+        try:
+            self.slot_file.unlink()
+        except Exception:
+            pass
+
     def on_close(self) -> None:
         self.manual_save()
         try:
@@ -999,6 +1088,7 @@ class FlowWorkerApp:
         except Exception:
             pass
         self.browser.stop(close_window=False)
+        self._remove_slot_file()
         self.root.destroy()
 
     @staticmethod

@@ -112,7 +112,13 @@ class LegacyWorkerBridge:
         cfg["prompts_file"] = str(temp_prompt_path.resolve())
         cfg["browser_launch_mode"] = "edge_human"
         cfg["browser_channel"] = "msedge"
-        cfg["browser_profile_dir"] = f"flowworker_{'video' if mode == 'asset' else 'image'}_profile"
+        profile_name = str(ui_cfg.get("browser_profile_name") or "").strip()
+        if not profile_name:
+            profile_name = f"flowworker_{'video' if mode == 'asset' else 'image'}_profile"
+        cfg["browser_profile_dir"] = profile_name
+        attach_url = str(ui_cfg.get("browser_attach_url") or "").strip()
+        if attach_url:
+            cfg["browser_attach_url"] = attach_url
         cfg["prompt_variant_count"] = str(ui_cfg.get("image_variant_count") or "x1").strip().lower() or "x1"
         cfg["asset_prompt_variant_count"] = str(ui_cfg.get("video_variant_count") or "x1").strip().lower() or "x1"
         cfg["download_image_quality"] = str(ui_cfg.get("image_quality") or "1K").strip().upper() or "1K"

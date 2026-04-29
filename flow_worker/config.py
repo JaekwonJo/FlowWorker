@@ -15,6 +15,7 @@ DOWNLOADS_DIR = "downloads"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "worker_name": "Flow Worker1",
+    "worker_index": 1,
     "project_profiles": [
         {
             "name": "기본 프로젝트",
@@ -37,6 +38,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "end_number": 10,
     "manual_numbers": "",
     "download_output_dir": "",
+    "browser_profile_name": "flowworker_profile_1",
     "browser_profile_dir": f"{RUNTIME_DIR}/flow_worker_edge_profile",
     "browser_attach_url": "http://127.0.0.1:9333",
     "edge_window_inner_width": 968,
