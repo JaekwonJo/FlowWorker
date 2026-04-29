@@ -39,6 +39,7 @@ class FlowWorkerApp:
         self.backend_last_log_lines: list[str] = []
         self.backend_last_updated_at = ""
         self.backend_active_mode = ""
+        self.backend_last_queue_signature = ""
         self.settings_collapsed = bool(self.cfg.get("settings_collapsed", False))
         self.log_panel_visible = bool(self.cfg.get("log_panel_visible", False))
         self._resize_drag_origin: tuple[int, int, int, int] | None = None
@@ -48,7 +49,7 @@ class FlowWorkerApp:
         self.root.title(f"Flow Worker - {self.cfg.get('worker_name', 'Flow Worker1')}")
         self.root.geometry(str(self.cfg.get("window_geometry") or "1060x760"))
         self.root.minsize(900, 560)
-        self.root.configure(bg="#14161B")
+        self.root.configure(bg=self._bg("root_bg"))
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self._build_vars()
@@ -86,31 +87,31 @@ class FlowWorkerApp:
 
     def _bg(self, key: str) -> str:
         theme = {
-            "root_bg": "#14161B",
-            "top_left_bg": "#1D2432",
-            "top_left_border": "#41608A",
-            "top_mid_bg": "#202B3E",
-            "top_mid_border": "#4C6B9A",
-            "top_right_bg": "#1D2432",
-            "settings_bg": "#1A2F4F",
-            "settings_border": "#5B84B8",
-            "queue_panel_bg": "#17283F",
-            "queue_panel_border": "#5B84B8",
-            "log_panel_bg": "#14161B",
-            "log_text_bg": "#101723",
-            "log_text_fg": "#D7E5FF",
-            "muted_fg": "#A9BDD8",
-            "sub_fg": "#C4D4EC",
-            "chip_bg": "#20304A",
-            "chip_fg": "#8FD0FF",
-            "progress_bg": "#152033",
-            "progress_border": "#314966",
-            "progress_fill": "#4CA7FF",
-            "small_btn_bg": "#233042",
-            "open_btn_bg": "#31527D",
-            "start_btn_bg": "#2F8A68",
-            "settings_toggle_bg": "#233042",
-            "status_fg": "#79E3A0",
+            "root_bg": "#251A12",
+            "top_left_bg": "#332217",
+            "top_left_border": "#A56B2A",
+            "top_mid_bg": "#3A2719",
+            "top_mid_border": "#B97833",
+            "top_right_bg": "#332217",
+            "settings_bg": "#3A2A1C",
+            "settings_border": "#B97833",
+            "queue_panel_bg": "#2D2117",
+            "queue_panel_border": "#A56B2A",
+            "log_panel_bg": "#221913",
+            "log_text_bg": "#18110D",
+            "log_text_fg": "#F5E8D5",
+            "muted_fg": "#D7C3A9",
+            "sub_fg": "#E4D2BA",
+            "chip_bg": "#493224",
+            "chip_fg": "#FFD08A",
+            "progress_bg": "#1E1510",
+            "progress_border": "#7E5425",
+            "progress_fill": "#F2A74B",
+            "small_btn_bg": "#6B4626",
+            "open_btn_bg": "#86552A",
+            "start_btn_bg": "#3A9B64",
+            "settings_toggle_bg": "#6B4626",
+            "status_fg": "#8FF0A8",
         }
         return theme[key]
 
@@ -792,7 +793,18 @@ class FlowWorkerApp:
         if not self.queue_items:
             tk.Label(self.queue_inner, text="아직 대기열이 없습니다.\n작업봇 창 열기나 시작을 누르면 여기에 상태가 쌓입니다.", bg=self._bg("queue_panel_bg"), fg=self._bg("sub_fg"), justify="left").pack(anchor="w", padx=10, pady=10)
         else:
-            for item in self.queue_items:
+            status_colors = {
+                "pending": "#5C432E",
+                "running": "#7B5424",
+                "waiting": "#6B5A34",
+                "downloading": "#2F6A50",
+                "success": "#1F5E43",
+                "failed": "#6B2B38",
+            }
+            cols = self._queue_column_count()
+            for col in range(cols):
+                self.queue_inner.grid_columnconfigure(col, weight=1, uniform="queue")
+            for idx, item in enumerate(self.queue_items):
                 status = self._queue_status(item)
                 if status in ("running", "waiting", "downloading"):
                     active += 1
@@ -802,19 +814,14 @@ class FlowWorkerApp:
                     failed += 1
                 else:
                     pending += 1
-                color = {
-                    "pending": "#233042",
-                    "running": "#244D7B",
-                    "waiting": "#314966",
-                    "downloading": "#2E6E5A",
-                    "success": "#1F5E43",
-                    "failed": "#6B2B38",
-                }.get(status, "#233042")
+                color = status_colors.get(status, "#5C432E")
                 card = tk.Frame(self.queue_inner, bg=color, highlightbackground=self._bg("queue_panel_border"), highlightthickness=1)
-                card.pack(fill="x", pady=(0, 8))
+                row = idx // cols
+                col = idx % cols
+                card.grid(row=row, column=col, sticky="nsew", padx=(0, 10) if col < cols - 1 else (0, 0), pady=(0, 10))
                 tk.Label(card, text=self._queue_tag(item), bg=color, fg="#FFFFFF", font=("Malgun Gothic", 10, "bold")).pack(anchor="w", padx=10, pady=(8, 2))
                 detail = self._queue_message(item) or self._queue_prompt(item)
-                tk.Label(card, text=detail[:160], bg=color, fg="#E8F1FF", justify="left", wraplength=620).pack(anchor="w", padx=10, pady=(0, 8))
+                tk.Label(card, text=detail[:180], bg=color, fg="#E8F1FF", justify="left", wraplength=260).pack(anchor="w", padx=10, pady=(0, 8))
         self.queue_summary_var.set(f"활성 {active}개 | 완료 {success} | 실패 {failed} | 대기 {pending}")
         self._update_queue_scroll()
 
@@ -830,6 +837,7 @@ class FlowWorkerApp:
 
     def _on_queue_canvas_resize(self, event) -> None:
         self.queue_canvas.itemconfigure(self.queue_window, width=event.width)
+        self._render_queue()
 
     def _on_mousewheel(self, event) -> None:
         try:
@@ -873,8 +881,11 @@ class FlowWorkerApp:
             self.queue_summary_var.set(queue_summary)
         queue_items = state.get("queue_items")
         if isinstance(queue_items, list):
-            self.queue_items = list(queue_items)
-            self._render_queue()
+            queue_signature = self._queue_signature(queue_items)
+            if queue_signature != self.backend_last_queue_signature:
+                self.backend_last_queue_signature = queue_signature
+                self.queue_items = list(queue_items)
+                self._render_queue()
         remote_logs = list(state.get("log_lines") or [])
         self._merge_backend_logs(remote_logs)
 
@@ -928,6 +939,44 @@ class FlowWorkerApp:
         if isinstance(item, dict):
             return str(item.get("prompt") or "").strip()
         return str(getattr(item, "prompt", "") or "").strip()
+
+    @staticmethod
+    def _queue_signature(items) -> str:
+        parts: list[str] = []
+        for item in list(items or []):
+            if isinstance(item, dict):
+                parts.append(
+                    "|".join(
+                        [
+                            str(item.get("token") or item.get("tag") or ""),
+                            str(item.get("status") or ""),
+                            str(item.get("detail") or item.get("message") or ""),
+                            str(item.get("file_name") or ""),
+                        ]
+                    )
+                )
+            else:
+                parts.append(
+                    "|".join(
+                        [
+                            str(getattr(item, "tag", "") or ""),
+                            str(getattr(item, "status", "") or ""),
+                            str(getattr(item, "message", "") or ""),
+                            str(getattr(item, "file_name", "") or ""),
+                        ]
+                    )
+                )
+        return "\n".join(parts)
+
+    def _queue_column_count(self) -> int:
+        width = max(1, int(self.queue_canvas.winfo_width() or 0))
+        if width >= 1260:
+            return 4
+        if width >= 960:
+            return 3
+        if width >= 680:
+            return 2
+        return 1
 
     def _start_resize_drag(self, event) -> None:
         self._resize_drag_origin = (event.x_root, event.y_root, self.root.winfo_width(), self.root.winfo_height())
