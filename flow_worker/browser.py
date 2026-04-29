@@ -153,7 +153,14 @@ class BrowserManager:
             if keep_page in target_pages:
                 target_keep = keep_page
             self.page = target_keep
-            for page in pages:
+            for page in target_pages:
+                if page is target_keep:
+                    continue
+                try:
+                    page.close()
+                except Exception:
+                    pass
+            for page in blank_pages:
                 if page is target_keep:
                     continue
                 try:
