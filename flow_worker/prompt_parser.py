@@ -70,7 +70,7 @@ def parse_prompt_blocks(
             prefix_match = re.match(r"^\s*([A-Za-z]+)", head)
             prefix_value = str(prefix_match.group(1) or prefix).upper() if prefix_match else str(prefix).upper()
             tag = f"{prefix_value}{str(number).zfill(max(3, int(pad_width or 3)))}"
-            rendered = f"{tag} Prompt : {body}"
+            rendered = f"{spec} Prompt : {body}"
         else:
             inline = re.match(r"^\s*0*([1-9][0-9]*)\s*:\s*(.*)\s*$", first, re.DOTALL)
             if inline:
