@@ -2090,6 +2090,7 @@ class FlowAutomationEngine:
         dirs: list[Path] = []
         home_dir = self.base_dir.parent
         for cand in (
+            self._resolve_download_dir(),
             home_dir / "Downloads",
             home_dir / "downloads",
             self.base_dir / "runtime" / "flow_worker_edge_profile" / "Default" / "Downloads",
@@ -2108,6 +2109,28 @@ class FlowAutomationEngine:
                 uniq.append(item)
                 seen.add(key)
         return uniq
+
+    def _ensure_download_behavior(self, page) -> None:
+        target_dir = self._resolve_download_dir()
+        last_error = ""
+        try:
+            session = page.context.new_cdp_session(page)
+        except Exception as exc:
+            self._emit_action(f"다운로드 경로 세션 생성 실패: {exc}")
+            return
+        for method, params in (
+            ("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": str(target_dir)}),
+            ("Browser.setDownloadBehavior", {"behavior": "allow", "downloadPath": str(target_dir), "eventsEnabled": True}),
+        ):
+            try:
+                session.send(method, params)
+                self._emit_action(f"다운로드 경로 적용: {method} -> {target_dir}")
+                return
+            except Exception as exc:
+                last_error = str(exc)
+                continue
+        if last_error:
+            self._emit_action(f"다운로드 경로 적용 실패: {last_error}")
 
     def _scan_download_source_snapshot(self) -> dict[str, tuple[float, int]]:
         snapshot: dict[str, tuple[float, int]] = {}
@@ -2168,6 +2191,11 @@ class FlowAutomationEngine:
         output_dir = self._resolve_download_dir()
         ext = source_path.suffix.strip() or ".png"
         target = output_dir / f"{tag}{ext}"
+        try:
+            if source_path.resolve() == target.resolve():
+                return target.name
+        except Exception:
+            pass
         if target.exists():
             stem = target.stem
             index = 2
@@ -2208,6 +2236,7 @@ class FlowAutomationEngine:
         return target.name
 
     def _download_image_for_tag(self, page, tag: str, quality: str, *, log: LogFn) -> str:
+        self._ensure_download_behavior(page)
         before_snapshot = self._scan_download_source_snapshot()
         search_fallback_used = False
         card_box = None
