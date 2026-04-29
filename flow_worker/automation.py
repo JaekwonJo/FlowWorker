@@ -17,6 +17,9 @@ StopFn = Callable[[], bool]
 class RunPlan:
     items: list[PromptBlock]
     selection_summary: str
+    image_count: int = 0
+    video_count: int = 0
+    routed_count: int = 0
 
 
 class FlowAutomationEngine:
@@ -40,7 +43,16 @@ class FlowAutomationEngine:
             extra_prefixes=("V",) if media_mode == "video" else (),
         )
         selected = self._filter_items(items)
-        return RunPlan(items=selected, selection_summary=self._selection_summary(selected, media_mode))
+        image_count = sum(1 for item in selected if item.media_mode == "image")
+        video_count = sum(1 for item in selected if item.media_mode == "video")
+        routed_count = sum(1 for item in selected if item.route_end_tag)
+        return RunPlan(
+            items=selected,
+            selection_summary=self._selection_summary(selected, media_mode),
+            image_count=image_count,
+            video_count=video_count,
+            routed_count=routed_count,
+        )
 
     def run(
         self,
@@ -57,13 +69,18 @@ class FlowAutomationEngine:
         media_mode = str(self.cfg.get("media_mode") or "image").strip().lower()
         set_status("Flow 자동화 준비 중")
         log(f"🧪 새 Flow Worker 독립 엔진 실행 준비 | 모드={media_mode} | 선택={plan.selection_summary}")
-        log("ℹ️ 현재 1차 버전은 백지 리포지토리 구조와 큐/브라우저 독립화까지 먼저 세운 상태입니다.")
-        log("ℹ️ 다음 단계에서 실제 Flow 생성/다운로드 동작을 이 엔진에 직접 연결합니다.")
+        log(f"🧾 계획 요약 | 이미지 {plan.image_count}개 | 비디오 {plan.video_count}개 | 라우트 {plan.routed_count}개")
         for item in plan.items:
             if should_stop():
                 set_status("중지됨")
                 log("⏹️ 사용자 중지 요청으로 작업을 멈췄습니다.")
                 return
+            route_hint = ""
+            if item.media_mode == "video" and item.frame_start_tag and item.frame_end_tag:
+                route_hint = f" | 시작프레임={item.frame_start_tag} | 끝프레임={item.frame_end_tag}"
+            elif item.route_end_tag:
+                route_hint = f" | route={item.route_start_tag}>{item.route_end_tag}"
+            log(f"대기 등록: {item.prompt_head}{route_hint}")
             update_queue(item.number, "pending", f"{item.tag} 준비됨", "")
         set_status("엔진 뼈대 준비 완료")
 

@@ -17,6 +17,12 @@ class PromptBlock:
     rendered_prompt: str
     raw: str
     references: list[str]
+    media_mode: str = "image"
+    prompt_head: str = ""
+    route_start_tag: str = ""
+    route_end_tag: str = ""
+    frame_start_tag: str = ""
+    frame_end_tag: str = ""
 
 
 def _normalize_body(body: str) -> str:
@@ -27,6 +33,32 @@ def _render_prompt(prefix: str, number: int, pad_width: int, body: str) -> tuple
     tag = f"{prefix}{str(number).zfill(max(3, int(pad_width or 3)))}"
     body_text = _normalize_body(body)
     return tag, f"{tag} Prompt : {body_text}"
+
+
+def _normalize_tag(raw: str, default_prefix: str, pad_width: int) -> str:
+    text = str(raw or "").strip().upper()
+    if not text:
+        return ""
+    match = re.match(r"^\s*([A-Z]+)?\s*0*([1-9][0-9]*)\s*$", text, re.IGNORECASE)
+    if not match:
+        return ""
+    prefix = str(match.group(1) or default_prefix or "S").strip().upper()
+    number = int(match.group(2))
+    return f"{prefix}{str(number).zfill(max(3, int(pad_width or 3)))}"
+
+
+def _route_frame_tags(start_tag: str, end_tag: str) -> tuple[str, str]:
+    start = ""
+    end = ""
+    if start_tag:
+        digits = re.sub(r"\D", "", start_tag)
+        if digits:
+            start = f"S{str(int(digits)).zfill(3)}"
+    if end_tag:
+        digits = re.sub(r"\D", "", end_tag)
+        if digits:
+            end = f"S{str(int(digits)).zfill(3)}"
+    return start, end
 
 
 def parse_prompt_blocks(
@@ -55,6 +87,12 @@ def parse_prompt_blocks(
         body = ""
         tag = ""
         rendered = chunk.strip()
+        prompt_head = ""
+        media_mode = "image"
+        route_start_tag = ""
+        route_end_tag = ""
+        frame_start_tag = ""
+        frame_end_tag = ""
 
         labeled = re.match(
             rf"^\s*(((?:{prefix_pattern})\s*0*([1-9][0-9]*))(?:\s*>\s*(?:{prefix_pattern})\s*0*([1-9][0-9]*))?)\s*(?:PROMPT|프롬프트)\s*:\s*(.*)\s*$",
@@ -70,7 +108,14 @@ def parse_prompt_blocks(
             prefix_match = re.match(r"^\s*([A-Za-z]+)", head)
             prefix_value = str(prefix_match.group(1) or prefix).upper() if prefix_match else str(prefix).upper()
             tag = f"{prefix_value}{str(number).zfill(max(3, int(pad_width or 3)))}"
-            rendered = f"{spec} Prompt : {body}"
+            prompt_head = tag
+            rendered = f"{tag} Prompt : {body}"
+            media_mode = "video" if prefix_value == "V" else "image"
+            route_start_tag = _normalize_tag(head, prefix_value, pad_width)
+            if ">" in spec:
+                tail = spec.split(">", 1)[1]
+                route_end_tag = _normalize_tag(tail, prefix_value, pad_width)
+            frame_start_tag, frame_end_tag = _route_frame_tags(route_start_tag, route_end_tag)
         else:
             inline = re.match(r"^\s*0*([1-9][0-9]*)\s*:\s*(.*)\s*$", first, re.DOTALL)
             if inline:
@@ -78,6 +123,8 @@ def parse_prompt_blocks(
                 inline_body = str(inline.group(2) or "").strip()
                 body = _normalize_body("\n".join(part for part in [inline_body, "\n".join(rest).strip()] if part))
                 tag, rendered = _render_prompt(prefix, number, pad_width, body)
+                prompt_head = tag
+                media_mode = "video" if str(prefix or "S").upper() == "V" else "image"
             else:
                 multi = re.match(r"^\s*0*([1-9][0-9]*)\s*:\s*$", first)
                 if not multi:
@@ -85,6 +132,8 @@ def parse_prompt_blocks(
                 number = int(multi.group(1))
                 body = _normalize_body("\n".join(rest))
                 tag, rendered = _render_prompt(prefix, number, pad_width, body)
+                prompt_head = tag
+                media_mode = "video" if str(prefix or "S").upper() == "V" else "image"
 
         if not number or not body:
             continue
@@ -96,7 +145,22 @@ def parse_prompt_blocks(
             if token and token not in seen:
                 refs.append(token)
                 seen.add(token)
-        items.append(PromptBlock(number=number, tag=tag, body=body, rendered_prompt=rendered, raw=chunk.strip(), references=refs))
+        items.append(
+            PromptBlock(
+                number=number,
+                tag=tag,
+                body=body,
+                rendered_prompt=rendered,
+                raw=chunk.strip(),
+                references=refs,
+                media_mode=media_mode,
+                prompt_head=prompt_head or tag,
+                route_start_tag=route_start_tag or tag,
+                route_end_tag=route_end_tag,
+                frame_start_tag=frame_start_tag,
+                frame_end_tag=frame_end_tag,
+            )
+        )
     items.sort(key=lambda item: item.number)
     return items
 
