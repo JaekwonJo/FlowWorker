@@ -1,106 +1,20 @@
-이 저장소는 `FlowWorker`입니다.
+이 저장소는 FlowWorker입니다.
 
-이 프롬프트는 새 Codex가 이전 세션 맥락을 최대한 그대로 이어받기 위한 시작용 프롬프트입니다.
+먼저 아래 문서를 순서대로 읽고 시작하세요.
 
-먼저 아래 순서대로 읽고 시작하세요.
-
-1. `codex 설명서.md`
-2. `CODEX_연속작업_인수인계_20260304.md`
-3. `README.md`
-4. `flow_worker/automation.py`
-5. `flow_worker/ui.py`
-6. `flow_worker/browser.py`
-7. `logs` 폴더의 최신 `action_trace_*.log`
-8. `git log --oneline -5`
-9. `git status --short`
+1. codex 설명서.md
+2. CODEX_연속작업_인수인계_20260304.md
+3. README.md
 
 중요 규칙:
 
-- 이 프로젝트는 `Flow Classic Plus`를 직접 실행하거나 import 하지 않는 완전 독립 앱입니다.
+- 이 프로젝트는 Flow Classic Plus를 직접 실행하거나 import 하지 않는 완전 독립 앱입니다.
 - 기존 기능은 필요할 때 로직만 참고해서 새 구조에 이식합니다.
 - 코드 수정 후에는 문서도 같이 갱신하고 가능하면 바로 GitHub에 commit/push 하세요.
-- 사용자는 윈도우에서 `FlowWorker_실행.vbs`로 바로 앱을 실행합니다.
-- 사용자는 쉬운 한국어 설명을 원합니다.
-- 코드 수정 전에는 무엇을 바꿀지 짧게 먼저 설명하세요.
+- 사용자는 윈도우에서 VBS 실행 파일로 바로 앱을 실행합니다.
 - 사용자가 `자 이제 대화 종료할꺼다 모든 내용 한방 프롬프트에 기록해줘` 라고 말하면, 종료 직전에 아래를 반드시 최신 상태로 갱신하세요.
   1. `새 Codex 시작용 한방 프롬프트.txt`
   2. `CODEX_연속작업_인수인계_20260304.md`
   3. `codex 설명서.md`
   4. 필요하면 `README.md`
   5. 최신 Git 상태, 현재 핵심 이슈, 다음 할 일, 최근 action trace 파일명
-
-현재 기준 시각:
-
-- 2026-04-28 Asia/Seoul
-
-최근 핵심 커밋:
-
-- `bff277c` Docs: add session-close handoff prompt rule
-- `f44ff56` Fix: add action trace and improve flow worker queue layout
-- `79fdcaf` Feat: port flow-style inline reference attachment
-- `51a6feb` Feat: add countdown HUD and first-pass image download
-- `20d22f8` Feat: match Flow settings and add human typing controls
-
-최근 action trace 파일:
-
-- `logs/action_trace_20260427_181630.log`
-
-현재 프로젝트 핵심 목표:
-
-- `FlowWorker`는 `Grok Worker`처럼 가벼운 새 독립 앱이어야 합니다.
-- 하지만 기능 동작은 `Flow Classic Plus`와 최대한 똑같아야 합니다.
-- 특히 중요:
-  - inline 레퍼런스 첨부 (`@S001` 등)
-  - 이미지 생성 후 다운로드 원스톱
-  - 상단 HUD / 남은 시간 표시
-  - 대기열 카드 UI
-  - 브라우저 탭 동작
-  - 액션 트레이스 로그
-
-지금까지 이미 된 것:
-
-- 독립 저장소 / 독립 실행 구조 / 독립 Edge 프로필(`runtime/flow_worker_edge_profile`) / 포트(`9333`) 분리
-- 갈색/앰버 계열 FlowWorker 전용 UI와 아이콘 적용
-- 프로젝트 / 프롬프트 파일 / 저장 폴더 관리
-- 사람처럼 한 글자씩 타이핑
-- 생성 후 대기 / 다음 작업 대기 카운트다운 HUD
-- 이미지 다운로드 1차
-- 대기열 카드 그리드 배치
-- 실행마다 `logs/action_trace_*.log` 생성
-
-지금 막혀 있는 핵심 이슈:
-
-1. `@레퍼런스` 첨부가 아직 Flow Classic Plus와 100% 같지 않습니다.
-   - 실제 사용자 화면에서는 `@` 호출 후 오버레이가 뜨지만,
-   - 현재 FlowWorker는 레퍼런스 검색 입력칸 탐지가 빗나가 `overlay-search-input-not-found`가 날 수 있습니다.
-   - 최근 사용자 스크린샷에서는 왼쪽 자산 목록 오버레이가 보였고, 검색창 placeholder가 `에셋 검색`, 정렬은 `오래된 순`으로 보였습니다.
-
-2. `about:blank` 탭 정리는 보강했지만, 사용자 화면에서 다시 재현되는지 꼭 재확인해야 합니다.
-
-3. 비디오 모드는 아직 본격 구현 전입니다.
-
-다음 Codex가 가장 먼저 할 일:
-
-1. 최신 `action_trace_*.log` 파일을 열어 레퍼런스 검색창 후보 덤프를 확인한다.
-2. `flow/flow_auto_v2.py`의 레퍼런스 첨부 원본 로직과 `flow_worker/automation.py`를 다시 비교한다.
-3. 특히 아래 흐름이 실제로 같은지 검증한다.
-   - `@` 트리거
-   - 검색창 탐지
-   - `오래된 순` 정렬
-   - 태그 입력
-   - `Enter` 첨부
-   - 첨부 후 이어서 본문 타이핑
-4. 필요하면 Flow 사이트 현재 DOM 기준으로 검색창 후보 조건을 더 좁히거나 넓힌다.
-5. 수정 후:
-   - 문서 갱신
-   - `git add .`
-   - `git commit`
-   - `git push`
-
-새 세션 시작 후 첫 답변에서는:
-
-- 읽은 문서 요약
-- 현재 핵심 이슈 3개
-- 바로 수정할 1순위
-
-를 짧고 정확하게 먼저 말한 뒤 작업을 이어가세요.
