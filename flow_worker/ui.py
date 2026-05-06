@@ -13,9 +13,9 @@ from .automation import FlowAutomationEngine
 from .browser import BrowserManager
 from .config import CONFIG_FILE, load_config, next_prompt_slot_file, save_config
 from .launcher import launch_next_worker
-from .legacy_worker_bridge import LegacyWorkerBridge
 from .prompt_parser import compress_numbers, summarize_prompt_file
 from .queue_state import QueueItem
+from .video_frame_tools import LastFrameExtractError, extract_last_frame, suggested_next_frame_path
 
 
 def _open_path(path: Path) -> None:
@@ -28,13 +28,13 @@ def _open_path(path: Path) -> None:
 
 
 class FlowWorkerApp:
-    def __init__(self, *, config_name: str | None = None, slot_file: str | None = None) -> None:
+    def __init__(self, *, config_name: str | None = None, slot_file: str | None = None, worker_index: int | None = None) -> None:
         self.base_dir = Path(__file__).resolve().parent.parent
         self.config_name = str(config_name or CONFIG_FILE).strip() or CONFIG_FILE
-        self.slot_file = Path(slot_file).resolve() if slot_file else None
         self.cfg = load_config(self.base_dir, config_name=self.config_name)
+        self._apply_worker_identity_override(worker_index)
+        self.slot_file = Path(slot_file).resolve() if slot_file else self._default_slot_file()
         self.browser = BrowserManager(self.log)
-        self.backend = LegacyWorkerBridge(self.base_dir, self.log)
         self.queue_items: list[QueueItem] = []
         self.log_lines: list[str] = []
         self.run_thread: threading.Thread | None = None
@@ -47,6 +47,11 @@ class FlowWorkerApp:
         self.settings_collapsed = bool(self.cfg.get("settings_collapsed", False))
         self.log_panel_visible = bool(self.cfg.get("log_panel_visible", False))
         self._resize_drag_origin: tuple[int, int, int, int] | None = None
+        self._queue_render_after_id: str | None = None
+        self._last_queue_cols = 0
+        self._backend_action_thread: threading.Thread | None = None
+        self._backend_action_name = ""
+        self._browser_open_thread: threading.Thread | None = None
         self._suspend_auto_save = True
 
         self.root = tk.Tk()
@@ -65,7 +70,24 @@ class FlowWorkerApp:
         self._suspend_auto_save = False
         self.refresh_all()
         self._write_slot_file()
-        self.root.after(400, self._poll_backend_state)
+
+    def _worker_runtime_key(self) -> str:
+        index = self._int_or_default(str(self.cfg.get("worker_index", 1) or 1), 1)
+        return f"worker_{index}"
+
+    def _apply_worker_identity_override(self, worker_index: int | None) -> None:
+        idx = self._int_or_default(str(worker_index or 0), 0)
+        if idx <= 0:
+            return
+        self.cfg["worker_index"] = idx
+        self.cfg["worker_name"] = f"Flow Worker{idx}"
+        self.cfg["browser_profile_name"] = f"flowworker_profile_{idx}"
+        self.cfg["browser_profile_dir"] = f"runtime/flow_worker_edge_profile_{idx}"
+        self.cfg["browser_attach_url"] = f"http://127.0.0.1:{9332 + idx}"
+
+    def _default_slot_file(self) -> Path:
+        index = self._int_or_default(str(self.cfg.get("worker_index", 1) or 1), 1)
+        return (self.base_dir / "runtime" / "worker_slots" / f"worker_slot_{index}.json").resolve()
 
     def _build_vars(self) -> None:
         self.worker_name_var = tk.StringVar()
@@ -81,6 +103,10 @@ class FlowWorkerApp:
         self.video_variant_var = tk.StringVar()
         self.image_quality_var = tk.StringVar()
         self.video_quality_var = tk.StringVar()
+        self.video_auto_extend_var = tk.BooleanVar(value=False)
+        self.video_auto_extract_last_frame_var = tk.BooleanVar(value=False)
+        self.video_extend_wait_var = tk.StringVar()
+        self.typing_speed_var = tk.StringVar()
         self.generate_wait_var = tk.StringVar()
         self.next_wait_var = tk.StringVar()
         self.status_var = tk.StringVar(value="준비 완료")
@@ -159,6 +185,7 @@ class FlowWorkerApp:
         self.settings_toggle_btn = self._action_button(action_left, "⚙ 설정 접기", self.toggle_settings_panel, self._bg("settings_toggle_bg"), small=True)
         self.settings_toggle_btn.pack(side="left", padx=6)
         self._action_button(action_right, "새 워커", self.open_additional_worker, self._bg("small_btn_bg"), small=True).pack(side="left", padx=(0, 6))
+        self._action_button(action_right, "현재 영상 확장", self.extend_current_video, self._bg("open_btn_bg")).pack(side="left", padx=(0, 6))
         self._action_button(action_right, "작업봇 창 열기", self.open_browser_window, self._bg("open_btn_bg")).pack(side="left", padx=(0, 6))
         self.start_btn = self._action_button(action_right, "▶ 시작", self.start_run, self._bg("start_btn_bg"))
         self.start_btn.pack(side="left")
@@ -197,7 +224,7 @@ class FlowWorkerApp:
         self.log_toggle_btn = self._action_button(queue_header, "로그 보기", self.toggle_log_panel, self._bg("open_btn_bg"), small=True)
         self.log_toggle_btn.pack(side="right", padx=(8, 0))
         self._action_button(queue_header, "실패 번호 복붙", self.copy_failed_numbers, self._bg("open_btn_bg"), small=True).pack(side="right", padx=(8, 0))
-        self._action_button(queue_header, "번호복사", self.copy_prompt_numbers, self._bg("open_btn_bg"), small=True).pack(side="right", padx=(8, 0))
+        self._action_button(queue_header, "지우기", self.clear_queue, self._bg("open_btn_bg"), small=True).pack(side="right", padx=(8, 0))
         tk.Label(queue_header, textvariable=self.queue_summary_var, bg=self._bg("queue_panel_bg"), fg=self._bg("sub_fg"), font=("Malgun Gothic", 8)).pack(side="right", padx=(10, 12))
 
         queue_body = tk.Frame(queue_wrap, bg=self._bg("queue_panel_bg"))
@@ -252,6 +279,10 @@ class FlowWorkerApp:
         tk.Label(prompt_summary_row, textvariable=self.prompt_file_summary_var, bg=self._bg("settings_bg"), fg=self._bg("sub_fg"), font=("Malgun Gothic", 9), justify="left", anchor="nw", height=3).pack(side="left", fill="x", expand=True, anchor="w")
 
         self._path_row(parent, "저장 폴더", self.download_dir_var, self.choose_download_dir)
+        longform_btns = tk.Frame(parent, bg=self._bg("settings_bg"))
+        longform_btns.pack(fill="x", padx=4, pady=(0, 8))
+        self._action_button(longform_btns, "다음 시작 프레임 추출", self.extract_next_start_frame, self._bg("open_btn_bg"), small=True, width=18).pack(side="left")
+        tk.Label(longform_btns, text="완성 mp4의 마지막 장면을 S다음번호.png로 저장", bg=self._bg("settings_bg"), fg=self._bg("sub_fg"), font=("Malgun Gothic", 9)).pack(side="left", padx=(10, 0))
         attach_note = tk.Frame(parent, bg=self._bg("settings_bg"))
         attach_note.pack(fill="x", padx=4, pady=(0, 8))
         tk.Label(attach_note, text="브라우저 연결", bg=self._bg("settings_bg"), fg="#D8E4FF", font=("Malgun Gothic", 10)).pack(anchor="w")
@@ -289,6 +320,36 @@ class FlowWorkerApp:
         tk.Label(video_row, text="비디오 화질", bg=self._bg("settings_bg"), fg="#D8E4FF", font=("Malgun Gothic", 10)).pack(side="left")
         self.video_quality_combo = self._choice_menu(video_row, self.video_quality_var, ("720P", "1080P", "4K"))
         self.video_quality_combo.pack(side="left", padx=(12, 0))
+        extend_row = tk.Frame(self.video_settings_frame, bg=self._bg("settings_bg"))
+        extend_row.pack(fill="x", padx=4, pady=(0, 6))
+        tk.Checkbutton(
+            extend_row,
+            text="생성 후 확장",
+            variable=self.video_auto_extend_var,
+            command=lambda: self.auto_save("확장 옵션 변경"),
+            bg=self._bg("settings_bg"),
+            fg="#FFFFFF",
+            selectcolor=self._bg("chip_bg"),
+            activebackground=self._bg("settings_bg"),
+            activeforeground="#FFFFFF",
+            font=("Malgun Gothic", 10),
+        ).pack(side="left")
+        tk.Checkbutton(
+            extend_row,
+            text="마지막 프레임 자동저장",
+            variable=self.video_auto_extract_last_frame_var,
+            command=lambda: self.auto_save("마지막 프레임 자동저장 변경"),
+            bg=self._bg("settings_bg"),
+            fg="#FFFFFF",
+            selectcolor=self._bg("chip_bg"),
+            activebackground=self._bg("settings_bg"),
+            activeforeground="#FFFFFF",
+            font=("Malgun Gothic", 10),
+        ).pack(side="left", padx=(12, 0))
+        tk.Label(extend_row, text="확장 대기(초)", bg=self._bg("settings_bg"), fg="#D8E4FF", font=("Malgun Gothic", 10)).pack(side="left", padx=(18, 8))
+        self.video_extend_wait_entry = tk.Entry(extend_row, textvariable=self.video_extend_wait_var, width=8, font=("Consolas", 11))
+        self.video_extend_wait_entry.pack(side="left")
+        self._bind_entry_autosave(self.video_extend_wait_entry, "확장 대기시간 변경")
 
         mode_row = tk.Frame(parent, bg=self._bg("settings_bg"))
         mode_row.pack(fill="x", padx=4, pady=(0, 6))
@@ -319,6 +380,12 @@ class FlowWorkerApp:
         self.generate_wait_entry = tk.Entry(wait_row_1, textvariable=self.generate_wait_var, width=8, font=("Consolas", 11))
         self.generate_wait_entry.pack(side="left", padx=(12, 0))
         self._bind_entry_autosave(self.generate_wait_entry, "생성 대기시간 변경")
+
+        typing_row = tk.Frame(parent, bg=self._bg("settings_bg"))
+        typing_row.pack(fill="x", padx=4, pady=(0, 6))
+        tk.Label(typing_row, text="타이핑 속도", bg=self._bg("settings_bg"), fg="#D8E4FF", font=("Malgun Gothic", 10)).pack(side="left")
+        self.typing_speed_combo = self._choice_menu(typing_row, self.typing_speed_var, tuple(f"x{i}" for i in range(1, 21)))
+        self.typing_speed_combo.pack(side="left", padx=(12, 0))
 
         wait_row_2 = tk.Frame(parent, bg=self._bg("settings_bg"))
         wait_row_2.pack(fill="x", padx=4, pady=(0, 4))
@@ -382,6 +449,10 @@ class FlowWorkerApp:
         self.video_variant_var.set(str(self.cfg.get("video_variant_count") or "x1"))
         self.image_quality_var.set(str(self.cfg.get("image_quality") or "1K"))
         self.video_quality_var.set(str(self.cfg.get("video_quality") or "1080P"))
+        self.video_auto_extend_var.set(bool(self.cfg.get("video_auto_extend", False)))
+        self.video_auto_extract_last_frame_var.set(bool(self.cfg.get("video_auto_extract_last_frame", False)))
+        self.video_extend_wait_var.set(str(self.cfg.get("video_extend_wait_seconds", 75.0) or 75.0))
+        self.typing_speed_var.set(str(self.cfg.get("typing_speed_profile") or "x5"))
         self.generate_wait_var.set(str(self.cfg.get("generate_wait_seconds", 10.0) or 10.0))
         self.next_wait_var.set(str(self.cfg.get("next_prompt_wait_seconds", 7.0) or 7.0))
         self.attach_url_var.set(f"MS Edge 연결 | {self.cfg.get('browser_attach_url', 'http://127.0.0.1:9222')}")
@@ -399,6 +470,10 @@ class FlowWorkerApp:
         self.cfg["video_variant_count"] = self.video_variant_var.get().strip() or "x1"
         self.cfg["image_quality"] = self.image_quality_var.get().strip().upper() or "1K"
         self.cfg["video_quality"] = self.video_quality_var.get().strip().upper() or "1080P"
+        self.cfg["video_auto_extend"] = bool(self.video_auto_extend_var.get())
+        self.cfg["video_auto_extract_last_frame"] = bool(self.video_auto_extract_last_frame_var.get())
+        self.cfg["video_extend_wait_seconds"] = self._float_or_default(self.video_extend_wait_var.get(), 75.0)
+        self.cfg["typing_speed_profile"] = self.typing_speed_var.get().strip().lower() or "x5"
         self.cfg["generate_wait_seconds"] = self._float_or_default(self.generate_wait_var.get(), 10.0)
         self.cfg["next_prompt_wait_seconds"] = self._float_or_default(self.next_wait_var.get(), 7.0)
         self.cfg["window_geometry"] = self.root.geometry()
@@ -675,6 +750,53 @@ class FlowWorkerApp:
         self.download_dir_var.set(chosen)
         self.auto_save("저장 폴더 변경")
 
+    def extract_next_start_frame(self) -> None:
+        current_dir = Path(self.download_dir_var.get().strip() or str((self.base_dir / "downloads").resolve()))
+        video_path = filedialog.askopenfilename(
+            initialdir=str(current_dir if current_dir.exists() else self.base_dir),
+            title="마지막 프레임을 추출할 영상 선택",
+            filetypes=(("Video files", "*.mp4 *.mov *.webm *.mkv *.avi"), ("All files", "*.*")),
+        )
+        if not video_path:
+            return
+        default_path = suggested_next_frame_path(video_path, current_dir)
+        save_path = filedialog.asksaveasfilename(
+            initialdir=str(default_path.parent),
+            initialfile=default_path.name,
+            title="다음 시작 프레임 저장",
+            defaultextension=".png",
+            filetypes=(("PNG image", "*.png"), ("JPEG image", "*.jpg *.jpeg"), ("All files", "*.*")),
+        )
+        if not save_path:
+            return
+        self.status_var.set("마지막 프레임 추출 중")
+        self.log(f"마지막 프레임 추출 시작: {Path(video_path).name} -> {Path(save_path).name}")
+
+        def _work() -> None:
+            try:
+                saved = extract_last_frame(video_path, save_path)
+            except LastFrameExtractError as exc:
+                self.root.after(0, lambda err=exc: self._finish_last_frame_extract_error(err))
+            except Exception as exc:
+                self.root.after(0, lambda err=exc: self._finish_last_frame_extract_error(err))
+            else:
+                self.root.after(0, lambda path=saved: self._finish_last_frame_extract_success(path))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _finish_last_frame_extract_success(self, path: Path) -> None:
+        self.status_var.set("마지막 프레임 저장 완료")
+        self.log(f"✅ 다음 시작 프레임 저장: {path}")
+        try:
+            _open_path(path.parent)
+        except Exception:
+            pass
+
+    def _finish_last_frame_extract_error(self, exc: Exception) -> None:
+        self.status_var.set("마지막 프레임 추출 실패")
+        self.log(f"❌ 마지막 프레임 추출 실패: {exc}")
+        messagebox.showerror("마지막 프레임 추출 실패", str(exc), parent=self.root)
+
     def copy_prompt_numbers(self) -> None:
         plan = FlowAutomationEngine(self.base_dir, self.cfg).build_plan()
         prefix = "V" if str(self.cfg.get("media_mode") or "image") == "video" else "S"
@@ -692,8 +814,9 @@ class FlowWorkerApp:
 
     def open_additional_worker(self) -> None:
         try:
-            launch_next_worker(self.base_dir)
-            self.log("새 워커 실행 요청")
+            current = self._int_or_default(str(self.cfg.get("worker_index", 1) or 1), 1)
+            pid = launch_next_worker(self.base_dir, index=current + 1)
+            self.log(f"새 워커 실행 요청: Flow Worker{current + 1}+ | pid={pid}")
         except Exception as exc:
             self.log(f"새 워커 실행 실패: {exc}")
             messagebox.showerror("새 워커 실행 실패", str(exc), parent=self.root)
@@ -701,13 +824,16 @@ class FlowWorkerApp:
     def assign_new_profile(self) -> None:
         current = self._int_or_default(str(self.cfg.get("worker_index", 1) or 1), 1)
         next_idx = max(1, current + 1)
+        self._remove_slot_file()
         self.cfg["worker_index"] = next_idx
         self.cfg["worker_name"] = f"Flow Worker{next_idx}"
         self.cfg["browser_profile_name"] = f"flowworker_profile_{next_idx}"
         self.cfg["browser_profile_dir"] = f"runtime/flow_worker_edge_profile_{next_idx}"
         self.cfg["browser_attach_url"] = f"http://127.0.0.1:{9332 + next_idx}"
+        self.slot_file = self._default_slot_file()
         self.worker_name_var.set(str(self.cfg["worker_name"]))
         self.manual_save()
+        self._write_slot_file()
         self.log(f"새 프로필 적용: {self.cfg['browser_profile_name']} | {self.cfg['browser_attach_url']}")
 
     def open_browser_window(self) -> None:
@@ -716,27 +842,58 @@ class FlowWorkerApp:
         if not project.get("url"):
             messagebox.showwarning("안내", "프로젝트 URL을 먼저 입력해주세요.", parent=self.root)
             return
-        try:
-            mode = self._current_backend_mode()
-            plan = FlowAutomationEngine(self.base_dir, self.cfg).build_plan()
-            self.backend.ensure_backend(
-                mode=mode,
-                ui_cfg=self.cfg,
-                plan_items=plan.items,
-            )
-            self.backend.send_action("open_browser")
-            self.status_var.set("브라우저 준비 완료")
-            self.log("브라우저 작업봇 창 열기 완료")
-        except Exception as exc:
-            self.status_var.set("브라우저 열기 실패")
-            self.log(f"브라우저 열기 실패: {exc}")
-            messagebox.showerror("브라우저 열기 실패", str(exc), parent=self.root)
+        self.status_var.set("브라우저 준비 중")
+        self._open_browser_window_async(project_url=str(project.get("url") or "").strip())
+
+    def extend_current_video(self) -> None:
+        if self.run_thread and self.run_thread.is_alive():
+            self.log("작업 실행 중에는 현재 영상 확장을 따로 시작할 수 없습니다.")
+            return
+        self.auto_save("현재 영상 확장 전 저장")
+        self.stop_requested = False
+        self.paused = False
+        self.status_var.set("현재 영상 확장 준비 중")
+        self.log("현재 영상 확장 시작: Flow 상세 화면의 현재 영상을 확장합니다.")
+
+        cfg_snapshot = self._cfg_snapshot()
+        cfg_snapshot["media_mode"] = "video"
+
+        def _finish_success(file_name: str) -> None:
+            self.status_var.set("현재 영상 확장 완료")
+            self.log(f"✅ 현재 영상 확장 완료: {file_name or '다운로드 없음'}")
+            self.run_thread = None
+
+        def _finish_error(exc: Exception) -> None:
+            self.status_var.set("현재 영상 확장 실패")
+            self.log(f"❌ 현재 영상 확장 실패: {exc}")
+            self.run_thread = None
+            messagebox.showerror("현재 영상 확장 실패", str(exc), parent=self.root)
+
+        def _worker() -> None:
+            try:
+                file_name = FlowAutomationEngine(self.base_dir, cfg_snapshot, self.browser).extend_current_video_screen(
+                    log=self._threadsafe_log,
+                    set_status=self._threadsafe_status,
+                    should_stop=lambda: bool(self.stop_requested),
+                    is_paused=lambda: bool(self.paused),
+                    tag="extended",
+                )
+            except Exception as exc:
+                self.root.after(0, lambda err=exc: _finish_error(err))
+                return
+            self.root.after(0, lambda name=file_name: _finish_success(name))
+
+        self.run_thread = threading.Thread(target=_worker, daemon=True)
+        self.run_thread.start()
 
     def start_run(self) -> None:
+        if self.run_thread and self.run_thread.is_alive():
+            self.log("이미 작업이 실행 중입니다.")
+            return
         self.stop_requested = False
         self.paused = False
         self.auto_save("시작 전 저장")
-        plan = FlowAutomationEngine(self.base_dir, self.cfg).build_plan()
+        plan = FlowAutomationEngine(self.base_dir, self.cfg, self.browser).build_plan()
         if not plan.items:
             messagebox.showwarning("안내", "실행할 프롬프트가 없습니다.", parent=self.root)
             self.log("실행할 프롬프트가 없습니다.")
@@ -752,48 +909,41 @@ class FlowWorkerApp:
         self._refresh_progress_from_plan(plan.items)
         self.status_var.set("실행 준비 중")
         self.log(f"실행 시작: {plan.selection_summary}")
-        try:
-            mode = self._current_backend_mode()
-            self.backend.ensure_backend(
-                mode=mode,
-                ui_cfg=self.cfg,
-                plan_items=plan.items,
-            )
-            self.backend.send_action("start")
-        except Exception as exc:
-            self.status_var.set("실행 실패")
-            self.log(f"실행 실패: {exc}")
-            messagebox.showerror("실행 실패", str(exc), parent=self.root)
+        self._run_local_engine_async(plan)
 
     def stop_all(self) -> None:
         self.stop_requested = True
         self.status_var.set("중지됨")
         self.log("완전정지")
-        try:
-            self.backend.send_action("stop")
-        except Exception:
-            pass
 
     def pause_run(self) -> None:
         self.paused = True
         self.status_var.set("일시정지")
         self.log("일시정지")
-        try:
-            self.backend.send_action("pause")
-        except Exception:
-            pass
 
     def resume_run(self) -> None:
         self.paused = False
         self.status_var.set("재개됨")
         self.log("재개")
-        try:
-            self.backend.send_action("resume")
-        except Exception:
-            pass
+
+    def clear_queue(self) -> None:
+        if self.run_thread and self.run_thread.is_alive():
+            messagebox.showinfo("안내", "작업 중에는 대기열을 지울 수 없습니다.", parent=self.root)
+            return
+        self.queue_items = []
+        self.backend_last_queue_signature = ""
+        self.backend_last_log_lines = []
+        self.progress_var.set("0 / 0 (0.0%)")
+        self.progress_canvas.coords(self.progress_fill, 0, 0, 0, 18)
+        self.status_var.set("준비 완료")
+        self._render_queue()
+        self.log("대기열 지우기")
 
     def _threadsafe_status(self, text: str) -> None:
         self.root.after(0, lambda value=text: self.status_var.set(value))
+
+    def _threadsafe_log(self, message: str) -> None:
+        self.root.after(0, lambda value=message: self.log(value))
 
     def _threadsafe_queue_update(self, number: int, status: str, message: str, file_name: str) -> None:
         def _apply() -> None:
@@ -804,6 +954,17 @@ class FlowWorkerApp:
                     item.file_name = file_name
                     break
             self._render_queue()
+
+        self.root.after(0, _apply)
+
+    def _threadsafe_progress_update(self, completed: int, total: int) -> None:
+        def _apply() -> None:
+            total_value = max(0, int(total or 0))
+            done_value = max(0, min(int(completed or 0), total_value)) if total_value > 0 else 0
+            pct = (done_value / total_value * 100.0) if total_value > 0 else 0.0
+            self.progress_var.set(f"{done_value} / {total_value} ({pct:.1f}%)")
+            width = 230.0 * (pct / 100.0)
+            self.progress_canvas.coords(self.progress_fill, 0, 0, width, 18)
 
         self.root.after(0, _apply)
 
@@ -825,12 +986,20 @@ class FlowWorkerApp:
         self.progress_canvas.coords(self.progress_fill, 0, 0, 0, 18)
 
     def _render_queue(self) -> None:
+        if self._queue_render_after_id:
+            try:
+                self.root.after_cancel(self._queue_render_after_id)
+            except Exception:
+                pass
+            self._queue_render_after_id = None
         for child in self.queue_inner.winfo_children():
             child.destroy()
         active = 0
         success = 0
         failed = 0
         pending = 0
+        cols = self._queue_column_count()
+        self._last_queue_cols = cols
         if not self.queue_items:
             tk.Label(self.queue_inner, text="아직 대기열이 없습니다.\n작업봇 창 열기나 시작을 누르면 여기에 상태가 쌓입니다.", bg=self._bg("queue_panel_bg"), fg=self._bg("sub_fg"), justify="left").pack(anchor="w", padx=10, pady=10)
         else:
@@ -842,7 +1011,6 @@ class FlowWorkerApp:
                 "success": "#1F5E43",
                 "failed": "#6B2B38",
             }
-            cols = self._queue_column_count()
             for col in range(cols):
                 self.queue_inner.grid_columnconfigure(col, weight=1, uniform="queue")
             for idx, item in enumerate(self.queue_items):
@@ -878,7 +1046,19 @@ class FlowWorkerApp:
 
     def _on_queue_canvas_resize(self, event) -> None:
         self.queue_canvas.itemconfigure(self.queue_window, width=event.width)
-        self._render_queue()
+        cols = self._queue_column_count_for_width(int(getattr(event, "width", 0) or 0))
+        if cols != self._last_queue_cols:
+            self._schedule_queue_render()
+        else:
+            self._update_queue_scroll()
+
+    def _schedule_queue_render(self, delay_ms: int = 80) -> None:
+        if self._queue_render_after_id:
+            try:
+                self.root.after_cancel(self._queue_render_after_id)
+            except Exception:
+                pass
+        self._queue_render_after_id = self.root.after(delay_ms, self._render_queue)
 
     def _on_mousewheel(self, event) -> None:
         try:
@@ -1011,6 +1191,11 @@ class FlowWorkerApp:
 
     def _queue_column_count(self) -> int:
         width = max(1, int(self.queue_canvas.winfo_width() or 0))
+        return self._queue_column_count_for_width(width)
+
+    @staticmethod
+    def _queue_column_count_for_width(width: int) -> int:
+        width = max(1, int(width or 0))
         if width >= 760:
             return 4
         if width >= 520:
@@ -1018,6 +1203,128 @@ class FlowWorkerApp:
         if width >= 300:
             return 2
         return 1
+
+    def _cfg_snapshot(self) -> dict:
+        return json.loads(json.dumps(self.cfg, ensure_ascii=False))
+
+    def _run_local_engine_async(self, plan) -> None:
+        cfg_snapshot = self._cfg_snapshot()
+
+        def _finish() -> None:
+            self.run_thread = None
+            if self.stop_requested:
+                self.status_var.set("중지됨")
+            elif self.paused:
+                self.status_var.set("일시정지")
+            elif not any(item.status == "failed" for item in self.queue_items):
+                self.status_var.set("작업 완료")
+
+        def _worker() -> None:
+            try:
+                FlowAutomationEngine(self.base_dir, cfg_snapshot, self.browser).run(
+                    plan=plan,
+                    log=self._threadsafe_log,
+                    set_status=self._threadsafe_status,
+                    update_queue=self._threadsafe_queue_update,
+                    update_progress=self._threadsafe_progress_update,
+                    should_stop=lambda: bool(self.stop_requested),
+                    is_paused=lambda: bool(self.paused),
+                )
+            except Exception as exc:
+                self.root.after(0, lambda err=exc: messagebox.showerror("실행 실패", str(err), parent=self.root))
+                self._threadsafe_log(f"실행 실패: {exc}")
+                self._threadsafe_status("실행 실패")
+            finally:
+                self.root.after(0, _finish)
+
+        self.run_thread = threading.Thread(target=_worker, daemon=True)
+        self.run_thread.start()
+
+    def _open_browser_window_async(self, *, project_url: str) -> None:
+        if self._browser_open_thread and self._browser_open_thread.is_alive():
+            self.log("브라우저 열기 처리 중입니다. 잠시만 기다려주세요.")
+            return
+        cfg_snapshot = self._cfg_snapshot()
+        profile_dir = str(cfg_snapshot.get("browser_profile_dir") or "").strip()
+        if not profile_dir:
+            profile_dir = f"runtime/flow_worker_edge_profile_{self._int_or_default(str(cfg_snapshot.get('worker_index', 1) or 1), 1)}"
+        attach_url = str(cfg_snapshot.get("browser_attach_url") or "").strip()
+
+        def _on_success() -> None:
+            self.status_var.set("브라우저 준비 완료")
+            self.log("브라우저 작업봇 창 열기 완료")
+            self._browser_open_thread = None
+
+        def _on_error(exc: Exception) -> None:
+            self.status_var.set("브라우저 열기 실패")
+            self.log(f"브라우저 열기 실패: {exc}")
+            self._browser_open_thread = None
+            messagebox.showerror("브라우저 열기 실패", str(exc), parent=self.root)
+
+        def _worker() -> None:
+            try:
+                self.browser.open_project(
+                    url=project_url,
+                    profile_dir=str((self.base_dir / profile_dir).resolve()),
+                    attach_url=attach_url,
+                    window_cfg=cfg_snapshot,
+                )
+            except Exception as exc:
+                self.root.after(0, lambda err=exc: _on_error(err))
+                return
+            self.root.after(0, _on_success)
+
+        self._browser_open_thread = threading.Thread(target=_worker, daemon=True)
+        self._browser_open_thread.start()
+
+    def _run_backend_action_async(
+        self,
+        *,
+        action: str,
+        mode: str,
+        plan_items,
+        action_name: str,
+        error_title: str,
+        success_status: str = "",
+        success_log: str = "",
+    ) -> None:
+        if self._backend_action_thread and self._backend_action_thread.is_alive():
+            self.log(f"{self._backend_action_name or '다른 작업'} 처리 중입니다. 잠시만 기다려주세요.")
+            return
+        cfg_snapshot = self._cfg_snapshot()
+        items_snapshot = list(plan_items or [])
+        self._backend_action_name = action_name
+
+        def _on_success() -> None:
+            if success_status:
+                self.status_var.set(success_status)
+            if success_log:
+                self.log(success_log)
+            self._backend_action_thread = None
+            self._backend_action_name = ""
+
+        def _on_error(exc: Exception) -> None:
+            self.status_var.set(error_title)
+            self.log(f"{error_title}: {exc}")
+            self._backend_action_thread = None
+            self._backend_action_name = ""
+            messagebox.showerror(error_title, str(exc), parent=self.root)
+
+        def _worker() -> None:
+            try:
+                self.backend.ensure_backend(
+                    mode=mode,
+                    ui_cfg=cfg_snapshot,
+                    plan_items=items_snapshot,
+                )
+                self.backend.send_action(action)
+            except Exception as exc:
+                self.root.after(0, lambda err=exc: _on_error(err))
+                return
+            self.root.after(0, _on_success)
+
+        self._backend_action_thread = threading.Thread(target=_worker, daemon=True)
+        self._backend_action_thread.start()
 
     @staticmethod
     def _stabilize_queue_detail(text: str) -> str:
@@ -1082,11 +1389,8 @@ class FlowWorkerApp:
             pass
 
     def on_close(self) -> None:
+        self.stop_requested = True
         self.manual_save()
-        try:
-            self.backend.shutdown()
-        except Exception:
-            pass
         self.browser.stop(close_window=False)
         self._remove_slot_file()
         self.root.destroy()
